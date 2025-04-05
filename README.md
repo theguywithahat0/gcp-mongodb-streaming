@@ -21,6 +21,7 @@ gcp-mongodb-streaming/
 │   │   ├── beam_pipeline.py  # Main Apache Beam pipeline
 │   │   ├── mongodb/         # MongoDB connectivity
 │   │   │   ├── source.py    # Change stream source
+│   │   │   ├── connection_manager.py  # MongoDB connection handling
 │   │   │   └── transforms.py # Document transformations
 │   │   ├── pubsub/         # Pub/Sub integration
 │   │   │   └── sink.py      # Publishing logic
@@ -34,6 +35,8 @@ gcp-mongodb-streaming/
 │   ├── test_mongodb/       # MongoDB tests
 │   ├── test_pubsub/        # Pub/Sub tests
 │   └── test_pipeline/      # Pipeline tests
+├── cheat_sheets/           # Documentation and examples
+│   └── connection_manager_explained.py  # Connection manager guide
 └── [Configuration Files]
 ```
 
@@ -71,12 +74,62 @@ The project uses two main configuration mechanisms:
    - Sensitive information
    - API keys and credentials
    - Connection strings
+   - Can override any YAML configuration value using `CONFIG_` prefix
 
 2. **Application Config** (config/config.yaml)
    - Pipeline settings
    - Batch sizes and windows
    - Topic/subscription names
    - Non-sensitive configuration
+   - Supports dot notation for nested access (e.g., `config.get("mongodb.connections.main.uri")`)
+   - Schema validation for required fields
+   - Default value support
+
+### Configuration Example
+```yaml
+mongodb:
+  connections:
+    main:
+      uri: ${MONGODB_URI}
+      database: mydb
+      sources:
+        orders:
+          collection: orders
+          batch_size: 100
+```
+
+Access via:
+```python
+config.get("mongodb.connections.main.uri")  # Returns URI
+config.get("mongodb.connections.main.sources.orders.batch_size", default=50)  # Returns 100
+```
+
+## MongoDB Connection Management
+
+The project uses an asynchronous MongoDB connection manager (`AsyncMongoDBConnectionManager`) that:
+- Handles multiple MongoDB connections concurrently using `motor_asyncio`
+- Processes change streams in parallel using asyncio tasks
+- Provides automatic retry with exponential backoff
+- Monitors connection and stream health with detailed statistics
+- Implements graceful error handling and recovery
+- Supports batch processing with configurable batch sizes
+- Maintains connection status tracking per stream
+
+Example configuration:
+```yaml
+mongodb:
+  connections:
+    client1:
+      uri: ${MONGODB_URI}
+      sources:
+        orders:
+          database: mydb
+          collection: orders
+          batch_size: 100
+          pipeline: []  # Optional aggregation pipeline
+```
+
+For detailed usage examples and documentation, see `cheat_sheets/connection_manager_explained.py`.
 
 ## Development
 
@@ -97,6 +150,13 @@ The project uses two main configuration mechanisms:
 ```bash
 pytest tests/
 ```
+
+### Documentation
+
+The project includes detailed cheat sheets and examples in the `cheat_sheets/` directory:
+- Connection Manager API documentation and examples
+- Configuration usage patterns
+- Best practices for stream handling
 
 ## Cost Management
 

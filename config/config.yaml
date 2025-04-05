@@ -1,8 +1,30 @@
 # MongoDB Configuration
 mongodb:
-  connection_string: "${MONGODB_URI}"
-  database: "${MONGODB_DATABASE}"
-  collection: "${MONGODB_COLLECTION}"
+  connections:
+    primary:
+      uri: "${MONGODB_PRIMARY_URI}"
+      retry:
+        max_attempts: 3
+        delay_seconds: 5
+      sources:
+        users:
+          database: "${MONGODB_USERS_DB}"
+          collection: "${MONGODB_USERS_COLLECTION}"
+          batch_size: 100
+        orders:
+          database: "${MONGODB_ORDERS_DB}"
+          collection: "${MONGODB_ORDERS_COLLECTION}"
+          batch_size: 200
+    analytics:
+      uri: "${MONGODB_ANALYTICS_URI}"
+      retry:
+        max_attempts: 3
+        delay_seconds: 5
+      sources:
+        metrics:
+          database: "${MONGODB_ANALYTICS_DB}"
+          collection: "${MONGODB_ANALYTICS_COLLECTION}"
+          batch_size: 500
 
 # Google Cloud Configuration
 gcp:
@@ -11,15 +33,22 @@ gcp:
   
   # Pub/Sub Configuration
   pubsub:
-    topic_name: "${PUBSUB_TOPIC}"
-    subscription_name: "${PUBSUB_SUBSCRIPTION}"
-    
-  # Dataflow Configuration
-  dataflow:
-    job_name: "mongodb-to-pubsub"
-    temp_location: "gs://${GCP_BUCKET}/temp"
-    staging_location: "gs://${GCP_BUCKET}/staging"
-    
+    topics:
+      users: "${PUBSUB_USERS_TOPIC}"
+      orders: "${PUBSUB_ORDERS_TOPIC}"
+      metrics: "${PUBSUB_METRICS_TOPIC}"
+    dead_letter_topic: "${DEAD_LETTER_TOPIC}"
+
+# Monitoring Configuration
+monitoring:
+  health_check_interval: 60  # seconds
+  connection_timeout: 5000   # milliseconds
+
+# Error Handling
+error_handling:
+  max_retries: 3
+  backoff_factor: 2  # exponential backoff multiplier
+
 # Streaming Configuration
 streaming:
   batch_size: 100  # Number of documents to process in each batch
