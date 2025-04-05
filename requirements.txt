@@ -1,0 +1,5 @@
+google-cloud-pubsub>=2.18.0
+apache-beam[gcp]>=2.50.0
+pymongo>=4.6.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1 

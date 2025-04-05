@@ -1,0 +1,26 @@
+# MongoDB Configuration
+mongodb:
+  connection_string: "${MONGODB_URI}"
+  database: "${MONGODB_DATABASE}"
+  collection: "${MONGODB_COLLECTION}"
+
+# Google Cloud Configuration
+gcp:
+  project_id: "${GCP_PROJECT_ID}"
+  region: "${GCP_REGION}"
+  
+  # Pub/Sub Configuration
+  pubsub:
+    topic_name: "${PUBSUB_TOPIC}"
+    subscription_name: "${PUBSUB_SUBSCRIPTION}"
+    
+  # Dataflow Configuration
+  dataflow:
+    job_name: "mongodb-to-pubsub"
+    temp_location: "gs://${GCP_BUCKET}/temp"
+    staging_location: "gs://${GCP_BUCKET}/staging"
+    
+# Streaming Configuration
+streaming:
+  batch_size: 100  # Number of documents to process in each batch
+  window_size_seconds: 60  # Window size for processing batches 
