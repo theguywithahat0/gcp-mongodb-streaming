@@ -32,6 +32,7 @@ ENV/
 
 # Environment variables
 .env
+tests/.env.test
 
 # GCP
 *.json

@@ -18,16 +18,18 @@ gcp-mongodb-streaming/
 │   └── config.yaml           # Main configuration file
 ├── src/
 │   ├── pipeline/
-│   │   ├── beam_pipeline.py  # Main Apache Beam pipeline
-│   │   ├── mongodb/         # MongoDB connectivity
-│   │   │   ├── source.py    # Change stream source
+│   │   ├── beam/          # Apache Beam components
+│   │   │   ├── pipeline.py  # Main pipeline definition
+│   │   │   └── sources/   # Beam source components
+│   │   │       └── mongodb.py  # MongoDB source
+│   │   ├── mongodb/       # MongoDB connectivity
 │   │   │   ├── connection_manager.py  # MongoDB connection handling
-│   │   │   └── transforms.py # Document transformations
-│   │   ├── pubsub/         # Pub/Sub integration
-│   │   │   └── sink.py      # Publishing logic
-│   │   └── utils/          # Shared utilities
-│   │       ├── config.py    # Configuration management
-│   │       └── logging.py   # Logging setup
+│   │   │   └── validator.py # Document validation and enrichment
+│   │   ├── pubsub/        # Pub/Sub integration
+│   │   │   └── sink.py     # Publishing logic
+│   │   └── utils/         # Shared utilities
+│   │       ├── config.py   # Configuration management
+│   │       └── logging.py  # Logging setup
 │   └── scripts/
 │       ├── setup_pubsub.py  # GCP resource setup
 │       └── run_pipeline.py  # Pipeline entry point
