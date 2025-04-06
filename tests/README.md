@@ -1,117 +1,65 @@
-# Test Suite
+# Tests
 
-This directory contains the test suite for the MongoDB to GCP Streaming Pipeline project.
+This directory contains tests for the GCP MongoDB Streaming project.
 
 ## Directory Structure
 
 ```
 tests/
-├── integration/           # Integration tests
-│   ├── test_stream_monitor.py    # Change stream monitoring tests
-│   └── test_data_generator.py    # Test data generation
-├── test_mongodb/         # MongoDB unit tests
-├── test_pubsub/         # Pub/Sub unit tests
-└── test_pipeline/       # Pipeline unit tests
+├── integration/              # Integration tests
+│   ├── change_streams/      # Change stream monitoring tests
+│   │   ├── test_stream_monitor.py
+│   │   └── test_data_generator.py
+│   └── validator/           # Document validation tests
+│       ├── test_validator_integration.py
+│       └── test_validator_data_generator.py
+├── test_pipeline/           # Unit tests for pipeline components
+└── test_mongodb/           # Unit tests for MongoDB components
 ```
 
-## Environment Configuration
+## Test Environment
 
-Test configuration is kept separate from production configuration to avoid mixing test and production settings.
+Tests use environment variables defined in `.env.test`. Copy `.env.test.example` to `.env.test` and configure:
 
-### Test Environment Setup
-
-1. Copy the test environment example file:
-   ```bash
-   cp .env.test.example .env.test
-   ```
-
-2. Edit `.env.test` with your test MongoDB credentials and settings:
-   ```
-   MONGODB_TEST_URI=your_test_mongodb_uri
-   MONGODB_TEST_DB=your_test_db
-   MONGODB_TEST_COLLECTION=your_test_collection
-
-   # Test Runtime Configuration
-   TEST_WRITE_INTERVAL=2  # seconds between writes
-   TEST_DURATION=60      # total test duration in seconds
-   ```
-
-   **Important**: Never use production credentials in test environment files.
-
-## Integration Tests
-
-The integration tests in `tests/integration/` validate the MongoDB change stream functionality:
-
-### Change Stream Testing
-
-Two scripts work together to test change stream functionality:
-
-1. **Data Generator** (`test_data_generator.py`):
-   - Generates random order data
-   - Writes to the test MongoDB collection at regular intervals
-   - Creates proper indexes for efficient streaming
-   - Handles duplicate order IDs
-   - Sample data includes:
-     - Order ID
-     - Product details
-     - Status
-     - Timestamps
-     - Customer information
-
-2. **Stream Monitor** (`test_stream_monitor.py`):
-   - Monitors the test collection for changes
-   - Uses MongoDB change streams
-   - Displays real-time updates
-   - Tracks operation types (insert, update, etc.)
-   - Shows full document content for each change
-
-### Running Integration Tests
-
-1. Ensure your test environment is configured:
-   ```bash
-   cp .env.test.example .env.test
-   # Edit .env.test with your MongoDB details
-   ```
-
-2. Run the monitor and generator in separate terminals:
-   ```bash
-   # Terminal 1: Start the change stream monitor
-   python tests/integration/test_stream_monitor.py
-
-   # Terminal 2: Start generating test data
-   python tests/integration/test_data_generator.py
-   ```
-
-3. Monitor Output:
-   - Watch real-time changes as they occur
-   - See full document contents
-   - View operation types (insert, update, etc.)
-   - Check error handling and reconnection
-
-4. Test Control:
-   - Tests run for 60 seconds by default (configurable via TEST_DURATION)
-   - Data is generated every 2 seconds (configurable via TEST_WRITE_INTERVAL)
-   - Can be stopped at any time with Ctrl+C
-   - Proper cleanup on exit
-
-### Test Data Schema
-
-The generator creates order documents with the following structure:
-```json
-{
-    "order_id": "ORD-XXXXX",
-    "product": "product_name",
-    "quantity": 1-5,
-    "status": ["pending", "processing", "shipped", "delivered"],
-    "price": 100.00-1000.00,
-    "created_at": "timestamp",
-    "customer_id": "CUST-XXXX"
-}
+```bash
+cp .env.test.example .env.test
 ```
+
+Required variables:
+- `MONGODB_TEST_URI`: MongoDB connection string
+- `MONGODB_TEST_DB`: Test database name
+- `MONGODB_TEST_COLLECTION`: Test collection name
+
+## Running Tests
 
 ### Unit Tests
-
-Unit tests use pytest and can be run with:
 ```bash
-pytest tests/test_mongodb/ tests/test_pubsub/ tests/test_pipeline/
-``` 
+python -m pytest tests/test_pipeline tests/test_mongodb
+```
+
+### Integration Tests
+
+Change Streams:
+```bash
+# Terminal 1: Start data generator
+./tests/integration/change_streams/test_data_generator.py
+
+# Terminal 2: Run stream monitor
+./tests/integration/change_streams/test_stream_monitor.py
+```
+
+Validator:
+```bash
+# Terminal 1: Start validator data generator
+./tests/integration/validator/test_validator_data_generator.py
+
+# Terminal 2: Run validator test
+./tests/integration/validator/test_validator_integration.py
+```
+
+## Test Configuration
+
+- `TEST_WRITE_INTERVAL`: Time between document writes (default: 2s)
+- `TEST_DURATION`: Test duration
+  - Change streams tests: 60s
+  - Validator tests: 30s 
