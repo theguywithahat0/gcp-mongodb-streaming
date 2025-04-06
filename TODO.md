@@ -46,9 +46,9 @@
   - [ ] Test different execution modes
 
 ## Phase 6: Documentation and Examples
-- [x] Add detailed API documentation
-- [x] Create usage examples
-- [x] Document configuration options
+- [ ] Add detailed API documentation
+- [ ] Create usage examples
+- [ ] Document configuration options
 - [ ] Add troubleshooting guide
 
 ## Testing Strategy
@@ -64,16 +64,9 @@
 - test/*: Test implementation branches
 - fix/*: Bug fixes
 
-## Current Focus ✅ (Completed: April 2024)
-1. MongoDB Source Connector Testing
-   - Branch: test/mongodb-connection
-   - [x] First: Write connection manager tests
-   - [x] Then: Test error handling and recovery
-   - [x] Finally: Test stream management
-
-## Next Focus
+## Current Focus
 1. Document Transformations
    - Branch: feature/document-transforms
-   - First: Write transformation tests
-   - Then: Implement transform logic
-   - Finally: Add schema validation
+   - Write transformation tests
+   - Implement transform logic
+   - Add schema validation
