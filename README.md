@@ -70,11 +70,17 @@ gcp-mongodb-streaming/
 ## Configuration
 
 The project uses two main configuration mechanisms:
-1. **Environment Variables** (.env file)
-   - Sensitive information
-   - API keys and credentials
-   - Connection strings
-   - Can override any YAML configuration value using `CONFIG_` prefix
+1. **Environment Variables**
+   - Production Environment (`.env`)
+     - Copy `.env.example` to `.env` for production settings
+     - Contains sensitive information like API keys and credentials
+     - Connection strings for production MongoDB and GCP services
+   
+   - Test Environment (`tests/.env.test`)
+     - Copy `tests/.env.test.example` to `tests/.env.test` for test settings
+     - Contains test-specific configuration
+     - Uses separate MongoDB instance for testing
+     - Never mix with production credentials
 
 2. **Application Config** (config/config.yaml)
    - Pipeline settings
@@ -153,9 +159,9 @@ pytest tests/
 
 ### Testing and Error Handling
 
-The project includes comprehensive test coverage for all components, with particular focus on the MongoDB connection manager:
+The project includes comprehensive test coverage for all components:
 
-#### Connection Manager Tests
+### Unit Tests
 - Connection initialization and cleanup
 - Change stream processing
 - Error handling and retry logic
@@ -163,11 +169,12 @@ The project includes comprehensive test coverage for all components, with partic
 - State transitions and monitoring
 - Resource cleanup and task management
 
-All tests are implemented using pytest-asyncio for proper async/await handling. The test suite includes:
-- Unit tests with mock MongoDB clients
-- Integration tests for stream processing
-- Error simulation and recovery testing
-- Performance monitoring tests
+### Integration Tests
+The project includes live integration tests to validate MongoDB change streams:
+- Real-time change stream monitoring
+- Test data generation and streaming
+- Connection handling and error recovery
+- See [tests/README.md](tests/README.md) for detailed documentation
 
 Key test scenarios covered:
 - Exponential backoff during connection failures
@@ -176,6 +183,8 @@ Key test scenarios covered:
 - Resource cleanup during shutdown
 - Task cancellation and state management
 - Connection pool management
+
+For detailed test documentation and examples, see the [Test Suite Documentation](tests/README.md).
 
 ### Documentation
 
