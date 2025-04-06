@@ -129,6 +129,7 @@ class AsyncMongoDBConnectionManager:
         stream_config: dict
     ):
         """Initialize a change stream for a specific source"""
+        stream_id = f"{connection_id}.{stream_name}"
         try:
             client = self.clients[connection_id]
             db = client[stream_config['database']]
@@ -149,7 +150,6 @@ class AsyncMongoDBConnectionManager:
                 last_healthy=datetime.now()
             )
             
-            stream_id = f"{connection_id}.{stream_name}"
             self.streams[stream_id] = {
                 'stream': stream,
                 'config': stream_config,
@@ -157,7 +157,7 @@ class AsyncMongoDBConnectionManager:
             }
             self.status[stream_id] = status
             
-            # Start processing task for this stream
+            # Only create processing task if stream initialization succeeded
             self.processing_tasks[stream_id] = asyncio.create_task(
                 self._process_stream(stream_id)
             )
@@ -166,6 +166,22 @@ class AsyncMongoDBConnectionManager:
             self.logger.error(
                 f"Failed to initialize stream {stream_name} for connection {connection_id}: {str(e)}"
             )
+            # Create or update status for failed stream
+            status = StreamStatus(
+                active=False,
+                connection_id=connection_id,
+                source_name=stream_name,
+                last_error=str(e),
+                last_error_time=datetime.now(),
+                total_errors=1
+            )
+            self.status[stream_id] = status
+            
+            # Don't create processing task for failed stream
+            if stream_id in self.processing_tasks:
+                self.processing_tasks[stream_id].cancel()
+                del self.processing_tasks[stream_id]
+                
             await self._handle_connection_error(connection_id, e)
 
     async def _process_stream(self, stream_id: str):
@@ -185,11 +201,19 @@ class AsyncMongoDBConnectionManager:
                     self.logger.info(f"Creating new stream for {stream_id}")
                     db = client[stream_info['config']['database']]
                     collection = db[stream_info['config']['collection']]
-                    stream = collection.watch(
-                        pipeline=stream_info['config'].get('pipeline', []),
-                        batch_size=stream_info['config'].get('batch_size', 100)
-                    )
-                    stream_info['stream'] = stream
+                    try:
+                        stream = collection.watch(
+                            pipeline=stream_info['config'].get('pipeline', []),
+                            batch_size=stream_info['config'].get('batch_size', 100)
+                        )
+                        stream_info['stream'] = stream
+                    except PyMongoError as e:
+                        self.logger.error(f"Failed to create stream for {stream_id}: {str(e)}")
+                        await self._handle_stream_error(stream_id, e)
+                        if status.retry_count >= max_retries:
+                            status.active = False
+                            return
+                        continue
                 else:
                     self.logger.info(f"Using existing stream for {stream_id}")
                 
@@ -238,10 +262,7 @@ class AsyncMongoDBConnectionManager:
                             
             except PyMongoError as e:
                 self.logger.error(f"Error in stream {stream_id}: {str(e)}")
-                status.last_error = str(e)
-                status.last_error_time = datetime.now()
-                status.retry_count += 1
-                status.total_errors += 1
+                await self._handle_stream_error(stream_id, e)
                 
                 if status.retry_count >= max_retries:
                     self.logger.error(f"Stopping stream {stream_id} after max retries")

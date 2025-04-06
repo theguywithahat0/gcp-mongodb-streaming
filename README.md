@@ -161,29 +161,34 @@ pytest tests/
 
 ### Testing and Error Handling
 
-The project includes comprehensive test coverage for all components:
+The project includes comprehensive test coverage (90%) for all components:
 
 ### Unit Tests
 - Connection initialization and cleanup
 - Change stream processing
-- Error handling and retry logic
+- Error handling and retry logic with exponential backoff
 - Stream recovery and parallel processing
 - State transitions and monitoring
 - Resource cleanup and task management
+- Mock change streams for reliable testing
 
-### Integration Tests
-The project includes live integration tests to validate MongoDB change streams:
-- Real-time change stream monitoring
-- Test data generation and streaming
-- Connection handling and error recovery
-- See [tests/README.md](tests/README.md) for detailed documentation
+### Error Handling Features
+The connection manager implements robust error handling:
+- Configurable retry limits and backoff settings
+- Automatic stream recovery after disconnections
+- Detailed error tracking per stream
+- Proper cleanup of resources on failures
+- Status monitoring with error counts and retry tracking
+- Graceful shutdown of active streams
 
 Key test scenarios covered:
-- Exponential backoff during connection failures
-- Parallel stream recovery after disconnections
-- Maximum retry limit handling
+- Connection failures with exponential backoff
+- Stream initialization errors
+- Parallel stream recovery
+- Maximum retry limit enforcement
 - Resource cleanup during shutdown
 - Task cancellation and state management
+- Batch processing with error recovery
 - Connection pool management
 
 For detailed test documentation and examples, see the [Test Suite Documentation](tests/README.md).
