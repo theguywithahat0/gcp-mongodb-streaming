@@ -10,6 +10,7 @@ import asyncio
 import random
 import datetime
 import logging
+import json
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from pymongo import IndexModel, ASCENDING
@@ -94,24 +95,35 @@ async def write_test_data():
         await setup_collection(collection)
         
         logger.info(f"Connected to MongoDB. Writing to {DATABASE}.{COLLECTION}")
-        logger.info(f"Will generate data for {TEST_DURATION} seconds, one document every {WRITE_INTERVAL} seconds")
+        logger.info("Will generate exactly 12 documents")
         
-        start_time = datetime.datetime.utcnow()
         operations_count = 0
+        generation_details = []
+        target_docs = 12  # Fixed number of documents
         
-        while (datetime.datetime.utcnow() - start_time).total_seconds() < TEST_DURATION:
+        while operations_count < target_docs:
             order = await generate_order()
             try:
                 result = await collection.insert_one(order)
                 operations_count += 1
-                logger.info(f"Inserted document {order['order_id']} - {operations_count} operations so far")
+                logger.info(f"Inserted document {order['order_id']} - {operations_count}/{target_docs} documents")
+                generation_time = datetime.datetime.utcnow().isoformat()
+                generation_details.append({
+                    "doc_id": str(result.inserted_id),
+                    "order_id": order['order_id'],
+                    "generated_at": generation_time,
+                    "timezone": "UTC"
+                })
             except Exception as e:
                 if "duplicate key error" in str(e).lower():
                     logger.warning(f"Duplicate order_id {order['order_id']}, retrying...")
                     continue
                 raise
                 
-            await asyncio.sleep(WRITE_INTERVAL)
+            # Add a small lag to help monitor catch up
+            await asyncio.sleep(0.1)  # 100ms lag
+            if operations_count < target_docs:  # Don't sleep after the last document
+                await asyncio.sleep(WRITE_INTERVAL)
             
     except Exception as e:
         logger.error(f"Error writing test data: {str(e)}")
@@ -119,6 +131,11 @@ async def write_test_data():
     finally:
         client.close()
         logger.info(f"Test completed. Generated {operations_count} documents")
+        # Write generation details to file
+        reports_dir = Path(__file__).parent.parent / 'reports'
+        reports_dir.mkdir(exist_ok=True)
+        with open(reports_dir / 'generation_details.json', 'w') as f:
+            json.dump(generation_details, f, indent=2)
 
 if __name__ == '__main__':
     if not MONGODB_URI:

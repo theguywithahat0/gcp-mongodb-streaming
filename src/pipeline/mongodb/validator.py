@@ -9,6 +9,8 @@ from datetime import datetime, UTC
 from typing import Any, Dict, List, Optional, Union
 import json
 import logging
+import time
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -199,20 +201,90 @@ class DocumentValidator:
 
     def prepare_for_pubsub(self, document: Dict[str, Any], operation_type: str) -> Dict[str, Any]:
         """
-        Prepare document for Pub/Sub.
+        Prepare document for publishing to Pub/Sub.
         
         Args:
-            document: Transformed document
+            document: Validated document
             operation_type: MongoDB change stream operation type
             
         Returns:
-            Document prepared for Pub/Sub
+            Document ready for Pub/Sub
         """
-        metadata = document.get("_metadata", {})
         return {
-            "operation": operation_type,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "connection_id": metadata.get("connection_id"),
-            "source_name": metadata.get("source_name"),
-            "document": document
+            "data": document,
+            "attributes": {
+                "operation": operation_type,
+                "timestamp": datetime.now(UTC).isoformat()
+            }
         }
+
+    async def cleanup_cursors(self, database) -> None:
+        """
+        Clean up any existing change stream cursors.
+        
+        Args:
+            database: MongoDB database instance
+        """
+        try:
+            # Get current operations
+            current_ops = await database.command(
+                'currentOp',
+                {'$or': [
+                    {'op': 'getmore'},
+                    {'op': 'command', 'command.getMore': {'$exists': True}}
+                ]}
+            )
+            
+            # Kill idle cursors
+            for op in current_ops.get('inprog', []):
+                if 'cursor' in op and op.get('microsecs_running', 0) > 5000:
+                    try:
+                        await database.command('killCursors', op['ns'], cursors=[op['cursor']])
+                    except Exception as e:
+                        logger.warning(f"Failed to kill cursor {op['cursor']}: {e}")
+                        
+        except Exception as e:
+            logger.warning(f"Failed to check for existing cursors: {e}")
+
+    async def watch_collection(self, collection, pipeline: List[Dict] = None, **kwargs):
+        """
+        Create a change stream with proper error handling and resume capability.
+        
+        Args:
+            collection: MongoDB collection to watch
+            pipeline: Optional aggregation pipeline
+            **kwargs: Additional arguments for watch
+            
+        Returns:
+            AsyncGenerator yielding change stream documents
+        """
+        resume_token = None
+        max_retry_time = 30  # Maximum time to retry in seconds
+        start_time = time.time()
+        
+        while True:
+            try:
+                watch_args = {
+                    'full_document': 'updateLookup',
+                    'max_await_time_ms': 1000,
+                    'batch_size': 1
+                }
+                
+                if pipeline:
+                    watch_args['pipeline'] = pipeline
+                if resume_token:
+                    watch_args['resume_after'] = resume_token
+                watch_args.update(kwargs)
+                
+                async with collection.watch(**watch_args) as stream:
+                    async for change in stream:
+                        resume_token = change['_id']
+                        yield change
+                        
+            except Exception as e:
+                if time.time() - start_time > max_retry_time:
+                    raise
+                    
+                logger.warning(f"Stream error, will retry: {e}")
+                await asyncio.sleep(1)
+                continue
