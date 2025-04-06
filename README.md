@@ -151,6 +151,32 @@ For detailed usage examples and documentation, see `cheat_sheets/connection_mana
 pytest tests/
 ```
 
+### Testing and Error Handling
+
+The project includes comprehensive test coverage for all components, with particular focus on the MongoDB connection manager:
+
+#### Connection Manager Tests
+- Connection initialization and cleanup
+- Change stream processing
+- Error handling and retry logic
+- Stream recovery and parallel processing
+- State transitions and monitoring
+- Resource cleanup and task management
+
+All tests are implemented using pytest-asyncio for proper async/await handling. The test suite includes:
+- Unit tests with mock MongoDB clients
+- Integration tests for stream processing
+- Error simulation and recovery testing
+- Performance monitoring tests
+
+Key test scenarios covered:
+- Exponential backoff during connection failures
+- Parallel stream recovery after disconnections
+- Maximum retry limit handling
+- Resource cleanup during shutdown
+- Task cancellation and state management
+- Connection pool management
+
 ### Documentation
 
 The project includes detailed cheat sheets and examples in the `cheat_sheets/` directory:
