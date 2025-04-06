@@ -5,11 +5,13 @@ Watches the test collection for changes and logs them.
 """
 
 import os
+import sys
 import asyncio
 import logging
 from motor.motor_asyncio import AsyncIOMotorClient
 from dotenv import load_dotenv
 from pymongo import ReadPreference
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(
@@ -18,9 +20,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables from tests/.env.test
-env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env.test')
-load_dotenv(env_path)
+# Add the project root to the Python path
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent.parent.parent.parent
+sys.path.append(str(project_root))
+
+# Add the integration tests directory to the Python path for fixtures
+integration_dir = current_dir.parent.parent
+sys.path.append(str(integration_dir))
+
+# Load environment variables from .env.integration
+env_path = project_root / 'tests' / 'config' / '.env.integration'
+if not env_path.exists():
+    raise FileNotFoundError(
+        f"Integration test environment file not found at {env_path}. "
+        "Please ensure .env.integration exists in the tests/config directory."
+    )
+load_dotenv(str(env_path))
+logger.info(f"Loaded integration test environment from {env_path}")
 
 async def monitor_changes(uri, database, collection, duration):
     """Simple change stream monitor implementation."""
