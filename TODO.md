@@ -20,16 +20,17 @@
   - [x] Test different document types and changes
 
 ## Phase 3: Google Cloud Pub/Sub Integration
-- [ ] Pub/Sub Sink
-  - [ ] Write tests for Pub/Sub publishing
-  - [ ] Implement Pub/Sub message formatting
-  - [ ] Add batching and error handling
-  - [ ] Test message delivery and ordering
+- [ ] Pub/Sub Sink 
+  - [ ] ~~Write tests for Pub/Sub publishing~~ (SKIPPED - will use native Beam)
+  - [x] Implement Pub/Sub message formatting (IMPLEMENTED BUT NOT USED)
+  - [ ] ~~Add batching and error handling~~ (SKIPPED - will use native Beam)
+  - [ ] ~~Test message delivery and ordering~~ (SKIPPED)
+- [x] Note: After evaluation, we've decided to use the native Apache Beam Pub/Sub sink instead of our custom implementation. The current PubSubSink class in src/pipeline/pubsub/sink.py is kept for reference but will not be used in the final pipeline.
 
-## Phase 4: Apache Beam Pipeline
+## Phase 4: Apache Beam Pipeline (CURRENT FOCUS)
 - [ ] Main Pipeline Implementation
   - [ ] Write tests for pipeline components
-  - [ ] Implement main pipeline flow
+  - [ ] Implement main pipeline flow using native Beam Pub/Sub sink
   - [ ] Add monitoring and metrics
   - [ ] Test end-to-end flow with test data
 
@@ -65,8 +66,8 @@
 - fix/*: Bug fixes
 
 ## Current Focus
-1. Document Transformations
-   - Branch: feature/document-transforms
-   - Write transformation tests
-   - Implement transform logic
-   - Add schema validation
+1. Apache Beam Pipeline
+   - Branch: feature/beam-pipeline
+   - Implement pipeline components using native Beam transforms
+   - Add monitoring and metrics
+   - Test with sample data
