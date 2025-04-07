@@ -78,7 +78,7 @@ async def monitor_changes(uri, database, collection, duration):
         },
         'monitoring': {
             'connection_timeout': 5000,
-            'max_inactivity_seconds': 60  # Increased to ensure we catch all documents
+            'max_inactivity_seconds': 30
         }
     }
     
