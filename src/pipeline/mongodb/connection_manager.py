@@ -225,68 +225,79 @@ class AsyncMongoDBConnectionManager:
         
         self.logger.info(f"Starting stream processing for {stream_id}")
         
-        while status.active and status.retry_count <= max_retries:
-            try:
-                # Use existing stream or create a new one
-                stream = stream_info.get('stream')
-                if stream is None:
-                    await self._initialize_stream(
-                        status.connection_id,
-                        status.source_name,
-                        stream_info['config']
+        try:
+            while status.active and status.retry_count <= max_retries:
+                try:
+                    # Use existing stream or create a new one
+                    stream = stream_info.get('stream')
+                    if stream is None:
+                        await self._initialize_stream(
+                            status.connection_id,
+                            status.source_name,
+                            stream_info['config']
+                        )
+                        continue
+                    
+                    async with stream:
+                        async for change in stream:
+                            if not status.active:
+                                break
+                                
+                            # Update resume token and last activity
+                            stream_info['resume_token'] = change['_id']
+                            last_activity = datetime.now()
+                            
+                            # Process the change
+                            await self._process_change(stream_id, change)
+                            status.last_healthy = datetime.now()
+                            stream_info['last_processed'] = datetime.now()
+                            
+                            # Check for inactivity
+                            if (datetime.now() - last_activity).total_seconds() > max_inactivity:
+                                self.logger.warning(f"Stream {stream_id} inactive for {max_inactivity}s, restarting")
+                                break
+                                
+                except asyncio.CancelledError:
+                    self.logger.info(f"Stream {stream_id} processing cancelled")
+                    raise
+                except Exception as e:
+                    error_msg = str(e)
+                    self.logger.error(f"Error processing stream {stream_id}: {error_msg}")
+                    
+                    # Handle specific cursor errors
+                    if any(msg in error_msg.lower() for msg in [
+                        'cursor id', 'cursorinuse', 'cursorkilled', 'operation was interrupted'
+                    ]):
+                        self.logger.info(f"Stream {stream_id} interrupted, will restart with resume token")
+                        stream_info['stream'] = None  # Force stream recreation
+                        await asyncio.sleep(1)
+                        continue
+                        
+                    # Update status and handle error
+                    status.last_error = error_msg
+                    status.last_error_time = datetime.now()
+                    status.retry_count += 1
+                    status.total_errors += 1
+                    
+                    await self._handle_stream_error(stream_id, e)
+                    
+                    if status.retry_count > max_retries:
+                        self.logger.error(f"Stream {stream_id} exceeded max retries, stopping")
+                        break
+                        
+                    # Calculate backoff time
+                    backoff = min(
+                        2 ** (status.retry_count - 1),
+                        self.config['error_handling'].get('max_backoff', 30)
                     )
-                    continue
-                
-                async with stream:
-                    async for change in stream:
-                        if not status.active:
-                            break
-                            
-                        # Update resume token and last activity
-                        stream_info['resume_token'] = change['_id']
-                        last_activity = datetime.now()
-                        
-                        # Process the change
-                        await self._process_change(stream_id, change)
-                        status.last_healthy = datetime.now()
-                        stream_info['last_processed'] = datetime.now()
-                        
-                        # Check for inactivity
-                        if (datetime.now() - last_activity).total_seconds() > max_inactivity:
-                            self.logger.warning(f"Stream {stream_id} inactive for {max_inactivity}s, restarting")
-                            break
-                            
-            except Exception as e:
-                error_msg = str(e)
-                self.logger.error(f"Error processing stream {stream_id}: {error_msg}")
-                
-                # Handle specific cursor errors
-                if any(msg in error_msg.lower() for msg in [
-                    'cursor id', 'cursorinuse', 'cursorkilled', 'operation was interrupted'
-                ]):
-                    self.logger.info(f"Stream {stream_id} interrupted, will restart with resume token")
-                    stream_info['stream'] = None  # Force stream recreation
-                    await asyncio.sleep(1)
-                    continue
-                    
-                # Update status and handle error
-                status.last_error = error_msg
-                status.last_error_time = datetime.now()
-                status.retry_count += 1
-                status.total_errors += 1
-                
-                await self._handle_stream_error(stream_id, e)
-                
-                if status.retry_count > max_retries:
-                    self.logger.error(f"Stream {stream_id} exceeded max retries, stopping")
-                    break
-                    
-                # Calculate backoff time
-                backoff = min(
-                    2 ** (status.retry_count - 1),
-                    self.config['error_handling'].get('max_backoff', 30)
-                )
-                await asyncio.sleep(backoff)
+                    await asyncio.sleep(backoff)
+        finally:
+            # Clean up the stream if it exists
+            if stream_info.get('stream'):
+                try:
+                    stream_info['stream'].close()
+                except Exception as e:
+                    self.logger.warning(f"Error closing stream {stream_id}: {str(e)}")
 
     async def _process_change(self, stream_id: str, change: dict):
         """Process a single change event from the change stream"""

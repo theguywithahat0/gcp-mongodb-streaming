@@ -15,10 +15,9 @@ def pytest_configure(config):
         load_dotenv(test_env)
     
     # Load integration test environment variables for integration tests
-    if any(item.get_marker("integration") for item in config.items):
-        integration_env = config_dir / ".env.integration"
-        if integration_env.exists():
-            load_dotenv(integration_env)
+    integration_env = config_dir / ".env.integration"
+    if integration_env.exists():
+        load_dotenv(integration_env)
 
 @pytest.fixture(scope="session")
 def project_root():
