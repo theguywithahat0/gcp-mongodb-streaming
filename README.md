@@ -34,9 +34,27 @@ gcp-mongodb-streaming/
 │       ├── setup_pubsub.py  # GCP resource setup
 │       └── run_pipeline.py  # Pipeline entry point
 ├── tests/                   # Test suite
-│   ├── test_mongodb/       # MongoDB tests
-│   ├── test_pubsub/        # Pub/Sub tests
-│   └── test_pipeline/      # Pipeline tests
+│   ├── unit/               # Unit tests
+│   │   ├── mongodb/        # MongoDB component tests
+│   │   │   ├── test_connection_manager.py   # Connection manager tests
+│   │   │   ├── test_connection_manager_error_handling.py   # Error handling tests
+│   │   │   └── validator/  # Validator tests
+│   │   │       ├── test_validator.py         # Basic validation tests
+│   │   │       ├── test_validator_edge_cases.py  # Edge case tests
+│   │   │       └── test_validator_watch.py   # Change stream tests
+│   │   └── config/         # Configuration tests
+│   │       └── test_config.py  # Configuration parsing tests
+│   ├── integration/        # Integration tests
+│   │   └── mongodb/        # MongoDB integration tests
+│   │       ├── change_streams/  # Change stream integration tests
+│   │       │   ├── run_test.py  # Change stream test runner
+│   │       │   ├── data_generator.py  # Test data generator
+│   │       │   └── stream_monitor.py  # Stream monitoring utility
+│   │       └── validator/   # Validator integration tests
+│   │           ├── run_test.py  # Validator test runner
+│   │           ├── data_generator.py  # Test data generator
+│   │           └── validator_monitor.py  # Validation monitoring utility
+│   └── conftest.py         # Test fixtures and configuration
 ├── cheat_sheets/           # Documentation and examples
 │   └── connection_manager_explained.py  # Connection manager guide
 └── [Configuration Files]
@@ -155,22 +173,82 @@ For detailed usage examples and documentation, see `cheat_sheets/connection_mana
 
 ### Running Tests
 
+Run all unit tests:
 ```bash
-pytest tests/
+pytest tests/unit/
+```
+
+Run specific test module:
+```bash
+pytest tests/unit/mongodb/test_connection_manager.py
+```
+
+Run MongoDB validator tests:
+```bash
+pytest tests/unit/mongodb/validator/
+```
+
+Run integration tests:
+```bash
+cd tests/integration/mongodb/change_streams
+python -m run_test
+
+cd tests/integration/mongodb/validator  
+python -m run_test
+```
+
+### Test Coverage
+
+The project includes comprehensive test coverage for all components:
+
+- Overall test coverage: **90%**
+- `connection_manager.py`: **87%** coverage
+- `validator.py`: **98%** coverage
+
+Generate coverage report:
+```bash
+pytest tests/unit/ --cov=src.pipeline.mongodb --cov-report=term-missing:skip-covered
 ```
 
 ### Testing and Error Handling
 
-The project includes comprehensive test coverage (90%) for all components:
+The test suite is organized into:
 
-### Unit Tests
-- Connection initialization and cleanup
-- Change stream processing
-- Error handling and retry logic with exponential backoff
-- Stream recovery and parallel processing
-- State transitions and monitoring
-- Resource cleanup and task management
-- Mock change streams for reliable testing
+#### Unit Tests
+- **Connection Manager Tests**
+  - Connection initialization and cleanup
+  - Change stream processing
+  - Error handling and retry logic
+  - Stream recovery with exponential backoff
+  - State transitions and monitoring
+  - Resource cleanup and task management
+  - Resume token handling
+  - Cursor timeout recovery
+  - Parallel stream recovery
+
+- **Validator Tests**
+  - Schema validation
+  - Document validation
+  - Field formatting
+  - PubSub message preparation
+  - Edge case handling
+  - Error recovery
+  - Custom validation functions
+  - Change stream watching
+
+#### Integration Tests
+- **Change Streams Tests**
+  - End-to-end testing of stream monitoring
+  - Document generation and processing
+  - Stream initialization and handling
+  - Resume token functionality
+  
+- **Validator Tests**
+  - End-to-end document validation
+  - Valid/invalid document processing
+  - Error handling
+  - Field validation rules
+  - Schema enforcement
 
 ### Error Handling Features
 The connection manager implements robust error handling:
@@ -180,25 +258,19 @@ The connection manager implements robust error handling:
 - Proper cleanup of resources on failures
 - Status monitoring with error counts and retry tracking
 - Graceful shutdown of active streams
+- Cursor error detection and remediation
+- Network timeout recovery
 
 Key test scenarios covered:
 - Connection failures with exponential backoff
 - Stream initialization errors
 - Parallel stream recovery
 - Maximum retry limit enforcement
+- Cursor not found and operation failure recovery
 - Resource cleanup during shutdown
 - Task cancellation and state management
 - Batch processing with error recovery
 - Connection pool management
-
-For detailed test documentation and examples, see the [Test Suite Documentation](tests/README.md).
-
-### Documentation
-
-The project includes detailed cheat sheets and examples in the `cheat_sheets/` directory:
-- Connection Manager API documentation and examples
-- Configuration usage patterns
-- Best practices for stream handling
 
 ## Cost Management
 

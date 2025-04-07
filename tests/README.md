@@ -6,30 +6,59 @@ This directory contains tests for the GCP MongoDB Streaming project.
 
 ```
 tests/
+├── unit/                     # Unit tests
+│   ├── mongodb/              # MongoDB component tests
+│   │   ├── test_connection_manager.py          # Connection manager tests
+│   │   ├── test_connection_manager_error_handling.py  # Error handling tests
+│   │   └── validator/        # Validator tests
+│   │       ├── test_validator.py                # Basic validation tests
+│   │       ├── test_validator_edge_cases.py     # Edge case tests
+│   │       └── test_validator_watch.py          # Change stream tests
+│   └── config/               # Configuration tests
+│       └── test_config.py    # Configuration parsing tests
 ├── integration/              # Integration tests
-│   ├── change_streams/      # Change stream monitoring tests
-│   │   ├── test_stream_monitor.py
-│   │   └── test_data_generator.py
-│   └── validator/           # Document validation tests
-│       ├── test_validator_integration.py
-│       └── test_validator_data_generator.py
-├── test_pipeline/           # Unit tests for pipeline components
-└── test_mongodb/           # Unit tests for MongoDB components
+│   └── mongodb/              # MongoDB integration tests
+│       ├── change_streams/   # Change stream integration tests
+│       │   ├── run_test.py          # Change stream test runner
+│   │   ├── data_generator.py    # Test data generator
+│   │   └── stream_monitor.py    # Stream monitoring utility
+│   └── validator/         # Validator integration tests
+│       ├── run_test.py           # Validator test runner
+│       ├── data_generator.py     # Test data generator
+│       └── validator_monitor.py  # Validation monitoring utility
+└── conftest.py              # Test fixtures and configuration
 ```
 
 ## Test Coverage
 
 The test suite maintains 90% code coverage across all components. Key areas covered:
 
+- Overall test coverage: **90%**
+- `connection_manager.py`: **87%** coverage (208 statements, 28 missed)
+- `validator.py`: **98%** coverage (102 statements, 2 missed)
+
 ### MongoDB Connection Manager Tests
-Located in `test_mongodb/test_connection_manager.py` and `test_connection_manager_error_handling.py`:
-- Basic connection management and stream processing
-- Error handling and recovery scenarios
-- Mock change streams for reliable testing
-- Connection failure simulation
-- Stream initialization errors
-- Batch processing with configurable sizes
-- Task management and cleanup
+Located in `unit/mongodb/test_connection_manager.py` and `test_connection_manager_error_handling.py`:
+- Connection initialization and cleanup
+- Change stream processing
+- Error handling and retry logic
+- Stream recovery with exponential backoff
+- State transitions and monitoring
+- Resource cleanup and task management
+- Resume token handling
+- Cursor timeout recovery
+- Parallel stream recovery
+
+### Validator Tests
+Located in `unit/mongodb/validator/`:
+- Schema validation
+- Document validation
+- Field formatting
+- PubSub message preparation
+- Edge case handling
+- Error recovery
+- Custom validation functions
+- Change stream watching
 
 ### Error Handling Tests
 The `test_connection_manager_error_handling.py` file contains specialized tests for:
@@ -40,6 +69,8 @@ The `test_connection_manager_error_handling.py` file contains specialized tests 
 - Status monitoring
 - Resource cleanup
 - Task cancellation
+- Cursor error detection and remediation
+- Network timeout recovery
 
 ## Test Environment
 
@@ -58,32 +89,31 @@ Required variables:
 
 ### Unit Tests
 ```bash
-# Run all tests with coverage report
-python -m pytest --cov=src --cov-report=term-missing tests/
+# Run all unit tests with coverage report
+python -m pytest tests/unit/ --cov=src.pipeline.mongodb --cov-report=term-missing:skip-covered
 
-# Run specific test files
-python -m pytest tests/test_mongodb/test_connection_manager.py
-python -m pytest tests/test_mongodb/test_connection_manager_error_handling.py
+# Run specific test modules
+python -m pytest tests/unit/mongodb/test_connection_manager.py
+python -m pytest tests/unit/mongodb/validator/
+
+# Run specific test cases
+python -m pytest tests/unit/mongodb/test_connection_manager.py::test_resume_token_handling
 ```
 
 ### Integration Tests
 
 Change Streams:
 ```bash
-# Terminal 1: Start data generator
-./tests/integration/change_streams/test_data_generator.py
-
-# Terminal 2: Run stream monitor
-./tests/integration/change_streams/test_stream_monitor.py
+# Run the change streams integration test
+cd tests/integration/mongodb/change_streams
+python -m run_test
 ```
 
 Validator:
 ```bash
-# Terminal 1: Start validator data generator
-./tests/integration/validator/test_validator_data_generator.py
-
-# Terminal 2: Run validator test
-./tests/integration/validator/test_validator_integration.py
+# Run the validator integration test
+cd tests/integration/mongodb/validator
+python -m run_test
 ```
 
 ## Test Configuration
@@ -94,11 +124,12 @@ Validator:
   - Validator tests: 30s
 
 Test behavior can be configured through `test_config` fixtures:
-- `max_retries`: Number of retry attempts (default: 2)
-- `connection_timeout`: Connection timeout in ms (default: 100)
+- `max_retries`: Number of retry attempts (default: 3)
+- `connection_timeout`: Connection timeout in ms (default: 1000)
 - `backoff_factor`: Retry backoff multiplier (default: 1)
-- `max_backoff`: Maximum backoff time in seconds (default: 1)
-- `max_changes_per_run`: Limit changes processed in tests (default: 5)
+- `max_backoff`: Maximum backoff time in seconds (default: 5)
+- `max_changes_per_run`: Limit changes processed in tests (default: 10)
+- `max_inactivity_seconds`: Maximum allowed inactivity before restart (default: 30)
 
 ### Mock Components
 
@@ -108,3 +139,14 @@ The test suite includes mock implementations for reliable testing:
   - Error injection capabilities
   - Controlled iteration behavior
   - Automatic cleanup 
+- `CustomDict`: Dictionary with configurable errors for testing error handling
+- `ErrorSequenceStream`: Stream that raises specific error sequences for testing
+
+## Integration Test Reports
+
+Both integration tests generate detailed reports in the `tests/integration/mongodb/reports/` directory, containing:
+- Document processing statistics
+- Valid/invalid document counts
+- Processing times
+- Error logs
+- Stream events 
