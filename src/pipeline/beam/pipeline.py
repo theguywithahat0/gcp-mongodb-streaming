@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional, List, Tuple
 
 from .sources.mongodb import ReadFromMongoDB
 from ..mongodb.validator import DocumentValidator
+from ..transforms.loader import load_transforms, validate_transform_config
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,15 @@ class FormatForPubSubFn(beam.DoFn):
             for key in ['source', 'connection_id', 'source_name', 'version']:
                 if key in metadata:
                     attributes[key] = str(metadata[key])
+            
+            # Add alert information as an attribute if present
+            if 'alert' in document:
+                attributes['alert'] = 'true'
+                attributes['alert_message'] = str(document['alert'])
+            
+            # Add threshold exceeded flag if present
+            if 'threshold_exceeded' in document:
+                attributes['threshold_exceeded'] = str(document['threshold_exceeded']).lower()
             
             # Convert document to JSON bytes
             message_data = json.dumps(document).encode('utf-8')
@@ -125,6 +135,18 @@ class RouteToTopicFn(beam.DoFn):
                         if not source_match:
                             continue
                     
+                    # Alert-based routing
+                    if rule.get('alert_only', False):
+                        alert_flag = attributes.get('alert') == 'true'
+                        if not alert_flag:
+                            continue
+                    
+                    # Threshold-based routing
+                    if rule.get('threshold_exceeded', False):
+                        threshold_flag = attributes.get('threshold_exceeded') == 'true'
+                        if not threshold_flag:
+                            continue
+                    
                     # Field-based routing
                     if 'field' in rule and 'value' in rule:
                         field_path = rule['field'].split('.')
@@ -138,9 +160,23 @@ class RouteToTopicFn(beam.DoFn):
                                 value = None
                                 break
                                 
-                        # Check if value matches
-                        if value != rule['value']:
-                            continue
+                        # Check if value matches based on operator
+                        operator = rule.get('operator', 'equals')
+                        if operator == 'equals':
+                            if value != rule['value']:
+                                continue
+                        elif operator == 'greater_than':
+                            try:
+                                if not (value and float(value) > float(rule['value'])):
+                                    continue
+                            except (TypeError, ValueError):
+                                continue
+                        elif operator == 'less_than':
+                            try:
+                                if not (value and float(value) < float(rule['value'])):
+                                    continue
+                            except (TypeError, ValueError):
+                                continue
                             
                     # If we got here, all rules matched
                     yield beam.pvalue.TaggedOutput(topic, element)
@@ -180,6 +216,24 @@ def build_pipeline(options: PipelineOptions, config: Dict[str, Any]) -> beam.Pip
     topics = pubsub_config.get('topics', {})
     routing_config = pubsub_config.get('routing', {})
     
+    # Validate transform configuration
+    transform_config = config.get('transforms', {})
+    transform_errors = validate_transform_config(transform_config)
+    if transform_errors:
+        for error in transform_errors:
+            logger.error(f"Transform configuration error: {error}")
+        logger.warning("Continuing without custom transforms due to configuration errors")
+    
+    # Load custom transforms
+    custom_transforms = []
+    if not transform_errors:
+        try:
+            custom_transforms = load_transforms(transform_config, schemas)
+            logger.info(f"Loaded {len(custom_transforms)} custom transforms")
+        except Exception as e:
+            logger.error(f"Error loading custom transforms: {str(e)}")
+            logger.warning("Continuing without custom transforms")
+    
     # Build topic paths
     project_id = gcp_options.project
     topic_paths = {
@@ -187,17 +241,22 @@ def build_pipeline(options: PipelineOptions, config: Dict[str, Any]) -> beam.Pip
         for name, details in topics.items()
     }
     
-    # Build pipeline
-    documents = (
-        pipeline
-        | 'ReadFromMongoDB' >> ReadFromMongoDB(mongodb_config, schemas)
-        | 'FormatForPubSub' >> beam.ParDo(FormatForPubSubFn())
-    )
+    # Start with MongoDB source
+    documents = pipeline | 'ReadFromMongoDB' >> ReadFromMongoDB(mongodb_config, schemas)
+    
+    # Apply custom transforms
+    for i, transform in enumerate(custom_transforms):
+        transform_name = transform.__class__.__name__
+        logger.info(f"Applying transform {i+1}: {transform_name}")
+        documents = documents | f'Transform_{i}_{transform_name}' >> transform
+    
+    # Format for Pub/Sub
+    formatted = documents | 'FormatForPubSub' >> beam.ParDo(FormatForPubSubFn())
     
     # Apply routing if configured
     if routing_config:
         # Route to different topics
-        routes = documents | 'RouteToTopics' >> beam.ParDo(
+        routes = formatted | 'RouteToTopics' >> beam.ParDo(
             RouteToTopicFn(routing_config)
         ).with_outputs()
         
@@ -212,7 +271,7 @@ def build_pipeline(options: PipelineOptions, config: Dict[str, Any]) -> beam.Pip
         # Simple case - write all to default topic
         default_topic = topic_paths.get('default')
         if default_topic:
-            documents | 'WriteToDefaultTopic' >> beam.io.WriteToPubSub(
+            formatted | 'WriteToDefaultTopic' >> beam.io.WriteToPubSub(
                 topic=default_topic,
                 with_attributes=True
             )

@@ -1,0 +1,47 @@
+# Stock Position Monitor Transform Configuration
+# This file shows how to configure the StockPositionMonitor transform
+# in the pipeline configuration
+
+transforms:
+  - name: stock_position_monitor
+    class: pipeline.transforms.examples.stock_monitoring.StockPositionMonitor
+    config:
+      # Time window in seconds for calculating positions
+      window_size: 300  # 5 minutes
+      
+      # Position thresholds that trigger alerts
+      thresholds:
+        # High-value tech stocks
+        - site: fidelity
+          stock: AAPL
+          limit: 1000  # Alert if position exceeds 1000 shares
+        
+        - site: etrade
+          stock: GOOGL
+          limit: 500   # Alert if position exceeds 500 shares
+        
+        # Finance sector
+        - site: td_ameritrade
+          stock: JPM
+          limit: 2000  # Alert if position exceeds 2000 shares
+        
+        # Volatile stocks - lower limits
+        - site: robinhood
+          stock: TSLA
+          limit: 250   # Alert if position exceeds 250 shares
+        
+        - site: interactive_brokers
+          stock: AMD
+          limit: 800   # Alert if position exceeds 800 shares
+
+# Pipeline input configuration
+input:
+  collection: stock_trades
+  database: trading
+  
+# Output topic configuration  
+output:
+  topic: projects/my-project/topics/processed-trades
+  
+  # Special routing for alerts
+  alert_topic: projects/my-project/topics/position-alerts 

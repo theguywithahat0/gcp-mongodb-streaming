@@ -31,23 +31,138 @@ gcp:
   project_id: "${GCP_PROJECT_ID}"
   region: "${GCP_REGION}"
   
-  # Pub/Sub Configuration
-  pubsub:
-    topics:
-      users: "${PUBSUB_USERS_TOPIC}"
-      orders: "${PUBSUB_ORDERS_TOPIC}"
-      metrics: "${PUBSUB_METRICS_TOPIC}"
-    dead_letter_topic: "${DEAD_LETTER_TOPIC}"
+# Pub/Sub Configuration
+pubsub:
+  topics:
+    # Define all topics
+    default:
+      name: "${PUBSUB_DEFAULT_TOPIC}"
+      description: "Default topic for all MongoDB changes"
+    users:
+      name: "${PUBSUB_USERS_TOPIC}"
+      description: "User document changes"
+    orders:
+      name: "${PUBSUB_ORDERS_TOPIC}"
+      description: "Order document changes"
+    high_value_orders:
+      name: "${PUBSUB_HIGH_VALUE_ORDERS_TOPIC}"
+      description: "High-value order document changes"
+    metrics:
+      name: "${PUBSUB_METRICS_TOPIC}"
+      description: "Analytics metrics changes"
+    alerts:
+      name: "${PUBSUB_ALERTS_TOPIC}"
+      description: "Alert messages for threshold violations"
+    dead_letter:
+      name: "${PUBSUB_DEAD_LETTER_TOPIC}"
+      description: "Dead letter topic for error handling"
+  
+  # Routing configuration
+  routing:
+    # All documents go to default topic
+    default: {}
+    
+    # Users collection documents go to users topic
+    users:
+      source: "users"
+    
+    # Orders collection documents go to orders topic
+    orders:
+      source: "orders"
+    
+    # High-value orders (over $1000) go to high_value_orders topic
+    high_value_orders:
+      source: "orders"
+      field: "total_amount"
+      value: 1000
+      operator: "greater_than"
+    
+    # Metrics documents go to metrics topic
+    metrics:
+      source: "metrics"
+      
+    # Alert messages go to alerts topic
+    alerts:
+      alert_only: true
+
+# Transform Configuration
+transforms:
+  # List of transforms to apply in order
+  transforms:
+    # Example stock monitoring transform (enabled by default)
+    - name: "StockPositionMonitor"
+      module: "pipeline.transforms.examples.stock_monitoring"
+      enabled: true
+      config:
+        thresholds:
+          - site: "fidelity"
+            stock: "AAPL"
+            limit: 100
+          - site: "etrade"
+            stock: "GOOGL"
+            limit: 50
+          - site: "robinhood"
+            stock: "TSLA"
+            limit: 25
+        window_size: 60
+        enable_metrics: true
+
+# Validation Schemas
+schemas:
+  "primary.users":
+    _id:
+      type: "string"
+      required: true
+    name:
+      type: "string"
+      required: true
+    email:
+      type: "string"
+      required: true
+  "primary.orders":
+    _id:
+      type: "string"
+      required: true
+    user_id:
+      type: "string"
+      required: true
+    total_amount:
+      type: "number"
+      required: true
+    items:
+      type: "array"
+      required: true
+  "analytics.metrics":
+    _id:
+      type: "string"
+      required: true
+    name:
+      type: "string"
+      required: true
+    value:
+      type: "number"
+      required: true
+    timestamp:
+      type: "date"
+      required: true
 
 # Monitoring Configuration
 monitoring:
   health_check_interval: 60  # seconds
   connection_timeout: 5000   # milliseconds
+  metrics:
+    enable: true
+    report_interval: 60  # seconds
+    namespace: "mongodb_streaming"
+    exporters:
+      stackdriver: true
+      prometheus: false
 
 # Error Handling
 error_handling:
   max_retries: 3
   backoff_factor: 2  # exponential backoff multiplier
+  dead_letter_topic: "dead_letter"  # Topic name for failed messages
 
 # Streaming Configuration
 streaming:

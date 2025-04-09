@@ -119,3 +119,35 @@ class ConfigManager:
             if default is not None:
                 return default
             raise KeyError(f"Configuration key not found: {key}") from e
+
+
+def load_config(config_path: str, required_keys: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Load configuration from a YAML file and return it as a dictionary.
+    
+    This is a helper function that creates a ConfigManager instance and
+    returns its config dictionary.
+    
+    Args:
+        config_path: Path to the YAML configuration file
+        required_keys: List of required configuration keys (dot notation supported)
+        
+    Returns:
+        Configuration dictionary
+        
+    Raises:
+        ValueError: If a required key is missing
+        FileNotFoundError: If the config file doesn't exist
+    """
+    # Allow user to pass paths relative to the current working directory
+    if not os.path.isabs(config_path):
+        config_path = os.path.join(os.getcwd(), config_path)
+    
+    # Create a config manager and return its config dictionary
+    config_manager = ConfigManager(config_path, required_keys)
+    
+    # Check if file exists
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    
+    return config_manager.config
