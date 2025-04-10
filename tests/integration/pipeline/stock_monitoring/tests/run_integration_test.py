@@ -170,7 +170,7 @@ class IntegrationTestRunner:
             "transforms": [
                 {
                     "name": "StockPositionMonitor",
-                    "module": "pipeline.transforms.examples.stock_monitoring",
+                    "module": "use_cases.stock_monitoring.stock_monitoring",
                     "enabled": True,
                     "config": {
                         "thresholds": json.loads(POSITION_THRESHOLDS)["thresholds"],

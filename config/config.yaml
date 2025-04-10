@@ -90,8 +90,8 @@ transforms:
   # List of transforms to apply in order
   transforms:
     # Example stock monitoring transform (enabled by default)
-    - name: "StockPositionMonitor"
-      module: "pipeline.transforms.examples.stock_monitoring"
+    - name: "stock_position_monitor"
+      module: "use_cases.stock_monitoring.stock_monitoring"
       enabled: true
       config:
         thresholds:
