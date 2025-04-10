@@ -47,8 +47,28 @@ use_cases/
     ├── __init__.py             # Package initialization with imports
     ├── your_transform.py       # Main transform implementation
     ├── your_transform_config.yaml  # Example configuration
-    ├── test_your_transform.py  # Unit tests
     └── README.md               # Documentation for the use case
+```
+
+Unit tests for use cases are located in a dedicated test directory:
+
+```
+tests/
+└── unit/
+    └── use_cases/
+        └── test_your_use_case.py  # Unit tests for your use case
+```
+
+Integration tests have their own directory structure:
+
+```
+tests/
+└── integration/
+    └── pipeline/
+        └── your_use_case/
+            ├── tests/          # Test scripts
+            ├── utils/          # Testing utilities
+            └── core/           # Core test functionality
 ```
 
 ## Step 1: Define Your Domain Model
@@ -70,8 +90,11 @@ mkdir -p use_cases/your_use_case
 touch use_cases/your_use_case/__init__.py
 touch use_cases/your_use_case/your_transform.py
 touch use_cases/your_use_case/your_transform_config.yaml
-touch use_cases/your_use_case/test_your_transform.py
 touch use_cases/your_use_case/README.md
+
+# Create the unit test directory
+mkdir -p tests/unit/use_cases
+touch tests/unit/use_cases/test_your_use_case.py
 ```
 
 In the `__init__.py` file, make your transform class available:
@@ -182,9 +205,11 @@ output:
 
 ## Step 5: Write Unit Tests
 
-Create unit tests for your transform:
+Create unit tests for your transform in the `tests/unit/use_cases` directory:
 
 ```python
+# In tests/unit/use_cases/test_your_use_case.py
+
 """Tests for the YourTransform."""
 
 import unittest
@@ -227,6 +252,25 @@ class YourTransformTest(unittest.TestCase):
             assert_that(results, equal_to(expected_output))
 ```
 
+It's also good practice to create a simple import test to verify your module structure:
+
+```python
+# In tests/unit/use_cases/test_imports.py
+
+import unittest
+
+class ImportTest(unittest.TestCase):
+    """Test importing the use case modules."""
+    
+    def test_import_transform(self):
+        """Test that the transform can be imported."""
+        try:
+            from use_cases.your_use_case.your_transform import YourTransform
+            self.assertTrue(True)
+        except ImportError as e:
+            self.fail(f"Failed to import YourTransform: {e}")
+```
+
 ## Step 6: Integrate with the Pipeline
 
 Update the main pipeline configuration to include your transform:
@@ -249,9 +293,123 @@ transforms:
 
 Create integration tests to verify your transform works with the full pipeline:
 
-1. Create a directory for your integration tests: `tests/integration/pipeline/your_use_case/`
-2. Create a test script that sets up MongoDB data, runs the pipeline, and verifies Pub/Sub output
-3. Include utilities for generating test data and monitoring results
+1. Create the directory structure for your integration tests:
+
+```bash
+# From the project root
+mkdir -p tests/integration/pipeline/your_use_case/tests
+mkdir -p tests/integration/pipeline/your_use_case/utils
+mkdir -p tests/integration/pipeline/your_use_case/core
+touch tests/integration/pipeline/your_use_case/README.md
+```
+
+2. Create a test script that verifies your use case:
+
+```python
+# In tests/integration/pipeline/your_use_case/tests/test_your_use_case.py
+
+#!/usr/bin/env python3
+"""
+Integration Test for Your Use Case Pipeline
+
+This test verifies the end-to-end functionality of your use case by:
+1. Generating and loading test data into MongoDB
+2. Running the pipeline to process the data
+3. Monitoring Pub/Sub for the expected outputs
+"""
+
+import os
+import sys
+import logging
+import asyncio
+from pathlib import Path
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Add project root to the Python path
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent.parent.parent.parent
+sys.path.append(str(project_root))
+
+# Import local modules
+from tests.integration.pipeline.your_use_case.utils.data_generator import (
+    YourDataGenerator, load_data_to_mongodb
+)
+from tests.integration.pipeline.your_use_case.utils.output_monitor import OutputMonitor
+
+# Your test implementation here...
+
+async def main():
+    """Run the integration test."""
+    # Your test logic here
+    
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+3. Create utilities for data generation and output monitoring:
+
+```python
+# In tests/integration/pipeline/your_use_case/utils/data_generator.py
+
+"""Data generation utilities for your use case tests."""
+
+import random
+import datetime
+import logging
+from typing import Dict, List, Any
+
+logger = logging.getLogger(__name__)
+
+class YourDataGenerator:
+    """Generator for test data."""
+    
+    def __init__(self, config):
+        """Initialize the generator with test configuration."""
+        self.config = config
+    
+    def generate_data(self) -> List[Dict[str, Any]]:
+        """Generate test data for your use case."""
+        # Your data generation logic here
+        
+async def load_data_to_mongodb(uri, database, collection, documents):
+    """Load test data to MongoDB."""
+    # Your data loading logic here
+```
+
+4. Create a pull messages script in the core directory:
+
+```python
+# In tests/integration/pipeline/your_use_case/core/pull_messages.py
+
+#!/usr/bin/env python3
+"""
+Utility to pull and display messages from your use case pipeline.
+
+This script allows you to verify the output of your pipeline by retrieving
+messages from the Pub/Sub subscriptions.
+"""
+
+import argparse
+import logging
+from google.cloud import pubsub_v1
+
+# Your message pulling implementation
+
+def main():
+    """Pull messages from Pub/Sub subscriptions."""
+    # Your implementation here
+    
+if __name__ == "__main__":
+    main()
+```
+
+Organize your integration tests similarly to the existing stock monitoring tests, but adapted for your specific use case.
 
 ## Example: Inventory Monitoring Use Case
 
