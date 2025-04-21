@@ -61,16 +61,22 @@ class ChangeStreamListener:
         # Get the collection to watch
         self.collection = self.mongo_client[config.mongodb.database][collection_config.name]
         
-        # Prepare Pub/Sub topic path
+        # Prepare Pub/Sub topic paths
         self.topic_path = self.publisher.topic_path(
             config.pubsub.project_id,
             collection_config.topic
+        )
+        self.status_topic_path = self.publisher.topic_path(
+            config.pubsub.project_id,
+            config.pubsub.status_topic
         )
 
         # Initialize state
         self.change_stream: Optional[ChangeStream] = None
         self.is_running = False
         self.last_resume_token = self._load_resume_token()
+        self.heartbeat_task: Optional[asyncio.Task] = None
+        self.last_change_time = time.time()
 
     def _load_resume_token(self) -> Optional[Dict[str, Any]]:
         """Load the last resume token from Firestore.
@@ -113,6 +119,51 @@ class ChangeStreamListener:
             self.config.firestore.collection
         ).document(f"{self.collection_config.name}_token")
 
+    async def _publish_heartbeat(self) -> None:
+        """Publish heartbeat messages periodically."""
+        while self.is_running:
+            try:
+                # Prepare heartbeat message
+                message = {
+                    "type": "heartbeat",
+                    "collection": self.collection_config.name,
+                    "timestamp": time.time(),
+                    "status": {
+                        "is_running": self.is_running,
+                        "last_change_time": self.last_change_time,
+                        "time_since_last_change": time.time() - self.last_change_time,
+                        "has_resume_token": self.last_resume_token is not None
+                    }
+                }
+
+                # Publish to status topic
+                future = self.publisher.publish(
+                    self.status_topic_path,
+                    json.dumps(message, cls=JSONEncoder).encode("utf-8"),
+                    message_type="heartbeat",
+                    collection=self.collection_config.name
+                )
+
+                # Wait for the publish to complete
+                await asyncio.get_event_loop().run_in_executor(
+                    None, future.result
+                )
+
+                logger.debug(
+                    "Published heartbeat",
+                    collection=self.collection_config.name
+                )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to publish heartbeat",
+                    error=str(e),
+                    collection=self.collection_config.name
+                )
+
+            # Wait for next interval
+            await asyncio.sleep(self.config.health.heartbeat.interval)
+
     async def _handle_change(self, change: Dict[str, Any]) -> None:
         """Handle a single change event.
         
@@ -120,6 +171,9 @@ class ChangeStreamListener:
             change: The change event from MongoDB.
         """
         try:
+            # Update last change time
+            self.last_change_time = time.time()
+
             # Extract the resume token
             if token := change.get("_id"):
                 self._save_resume_token(token)
@@ -248,6 +302,10 @@ class ChangeStreamListener:
             "Starting change stream listener",
             collection=self.collection_config.name
         )
+
+        # Start heartbeat task if enabled
+        if self.config.health.heartbeat.enabled:
+            self.heartbeat_task = asyncio.create_task(self._publish_heartbeat())
         
         await self._watch_collection()
 
@@ -257,6 +315,14 @@ class ChangeStreamListener:
         
         if self.change_stream:
             self.change_stream.close()
+
+        # Stop heartbeat task if running
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
             
         logger.info(
             "Stopped change stream listener",

@@ -13,7 +13,7 @@ class MongoDBCollectionConfig:
     """Configuration for a MongoDB collection to watch."""
     name: str
     topic: str
-    watch_filter: Optional[Dict[str, Any]] = None
+    watch_filter: Optional[List[Dict[str, Any]]] = None
 
 @dataclass
 class MongoDBConfig:
@@ -35,6 +35,7 @@ class PubSubConfig:
     project_id: str
     default_topic_settings: Dict[str, Any]
     publisher: PubSubPublisherConfig
+    status_topic: str
 
 @dataclass
 class FirestoreConfig:
@@ -49,10 +50,17 @@ class MonitoringConfig:
     tracing: Dict[str, Any]
 
 @dataclass
+class HeartbeatConfig:
+    """Heartbeat configuration."""
+    interval: int
+    enabled: bool
+
+@dataclass
 class HealthConfig:
     """Health check configuration."""
     endpoints: Dict[str, str]
     readiness: Dict[str, Any]
+    heartbeat: HeartbeatConfig
 
 @dataclass
 class RetryConfig:
@@ -190,13 +198,21 @@ class ConfigurationManager:
             pubsub = PubSubConfig(
                 project_id=config["pubsub"]["project_id"],
                 default_topic_settings=config["pubsub"]["default_topic_settings"],
-                publisher=PubSubPublisherConfig(**config["pubsub"]["publisher"])
+                publisher=PubSubPublisherConfig(**config["pubsub"]["publisher"]),
+                status_topic=config["pubsub"]["status_topic"]
             )
+
+            # Create heartbeat config
+            heartbeat = HeartbeatConfig(**config["health"]["heartbeat"])
 
             # Create other configs
             firestore = FirestoreConfig(**config["firestore"])
             monitoring = MonitoringConfig(**config["monitoring"])
-            health = HealthConfig(**config["health"])
+            health = HealthConfig(
+                endpoints=config["health"]["endpoints"],
+                readiness=config["health"]["readiness"],
+                heartbeat=heartbeat
+            )
             retry = RetryConfig(**config["retry"])
 
             return ConnectorConfig(
