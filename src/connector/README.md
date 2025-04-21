@@ -6,7 +6,7 @@ This connector streams real-time changes from MongoDB collections to Google Clou
 
 - Real-time MongoDB change stream monitoring
 - Reliable message delivery to Pub/Sub
-- Document schema validation for data integrity
+- Document schema validation and versioning
 - Resume token management for fault tolerance
 - Structured logging for operational visibility
 - Comprehensive error handling
@@ -50,6 +50,68 @@ Key configuration options:
 - Resume token storage settings
 - Logging configuration
 
+### Schema Versioning
+
+The connector includes a robust schema versioning system that ensures data consistency and backward compatibility:
+
+#### Schema Registry
+- Centralized management of document schemas
+- Support for multiple versions per document type
+- Automatic version detection and validation
+- Easy addition of new schema versions
+
+Example schema version:
+```python
+INVENTORY_SCHEMAS = {
+    "v1": {
+        "type": "object",
+        "required": [
+            "_schema_version",
+            "product_id",
+            "warehouse_id",
+            "quantity",
+            "last_updated"
+        ],
+        "properties": {
+            "_schema_version": {"type": "string", "enum": ["v1"]},
+            "product_id": {"type": "string"},
+            "warehouse_id": {"type": "string"},
+            "quantity": {"type": "integer", "minimum": 0},
+            "last_updated": {"type": "string", "format": "date-time"}
+        }
+    }
+}
+```
+
+#### Schema Migration
+- Automatic migration of documents to latest schema version
+- Support for custom migration functions
+- Path finding for multi-step migrations
+- Error handling and logging during migration
+
+Example migration registration:
+```python
+def migrate_inventory_v1_to_v2(doc):
+    return {
+        **doc,
+        "_schema_version": "v2",
+        "new_field": "default_value"
+    }
+
+SchemaMigrator.register_migration(
+    DocumentType.INVENTORY,
+    "v1",
+    "v2",
+    migrate_inventory_v1_to_v2
+)
+```
+
+#### Version Tracking
+- Schema version included in Pub/Sub messages
+- Logging of schema versions and migrations
+- Validation against specific schema versions
+- Automatic handling of unversioned documents
+
 ### Structured Logging
 
 The connector uses structured JSON logging for better operational visibility and monitoring:
@@ -63,7 +125,8 @@ The connector uses structured JSON logging for better operational visibility and
     "operation": "insert",
     "warehouse_id": "WH-EAST-1",
     "document_id": "123456",
-    "correlation_id": "abc-xyz-789"
+    "correlation_id": "abc-xyz-789",
+    "schema_version": "v1"
 }
 ```
 
@@ -72,6 +135,7 @@ Standard log fields:
 - `level`: Log severity (DEBUG, INFO, WARNING, ERROR)
 - `event`: Event type identifier
 - `correlation_id`: Unique identifier for tracking related events
+- `schema_version`: Document schema version
 
 Event-specific fields are included based on the operation type and context.
 

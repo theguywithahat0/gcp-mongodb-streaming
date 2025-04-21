@@ -5,9 +5,11 @@ This module provides schema validation functionality for inventory and transacti
 documents before they are processed and sent to Google Cloud Pub/Sub.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from jsonschema import validate, ValidationError
 import logging
+
+from .schema_registry import SchemaRegistry, DocumentType
 
 # Schema for inventory documents
 INVENTORY_SCHEMA = {
@@ -76,11 +78,34 @@ class SchemaValidator:
             None if validation succeeds, error message string if validation fails
         """
         try:
-            schema = INVENTORY_SCHEMA if doc_type == 'inventory' else TRANSACTION_SCHEMA
+            # Convert string doc_type to enum
+            doc_type_enum = (
+                DocumentType.INVENTORY if doc_type == 'inventory'
+                else DocumentType.TRANSACTION
+            )
+
+            # Get document version, default to latest if not specified
+            version = document.get('_schema_version')
+            
+            # If no version is specified, add the latest version
+            if not version:
+                version = SchemaRegistry.get_latest_version(doc_type_enum)
+                document['_schema_version'] = version
+                logging.info(
+                    f"Added schema version {version} to {doc_type} document"
+                )
+
+            # Get and validate against schema
+            schema = SchemaRegistry.get_schema(doc_type_enum, version)
             validate(instance=document, schema=schema)
             return None
+
         except ValidationError as e:
             error_msg = f"Schema validation failed for {doc_type} document: {str(e)}"
+            logging.error(error_msg)
+            return error_msg
+        except ValueError as e:
+            error_msg = f"Invalid schema version for {doc_type} document: {str(e)}"
             logging.error(error_msg)
             return error_msg
 

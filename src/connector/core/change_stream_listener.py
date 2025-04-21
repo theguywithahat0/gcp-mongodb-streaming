@@ -16,6 +16,8 @@ from ..config.config_manager import (ConnectorConfig, MongoDBCollectionConfig,
                                    RetryConfig)
 from ..logging.logging_config import get_logger, add_context_to_logger
 from .schema_validator import SchemaValidator
+from .schema_registry import DocumentType
+from .schema_migrator import SchemaMigrator, SchemaMigrationError
 
 class JSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles MongoDB ObjectId."""
@@ -205,16 +207,36 @@ class ChangeStreamListener:
                     )
                     return
 
-                # Determine document type and validate
-                doc_type = "inventory" if self.collection_config.name == "inventory" else "transaction"
-                validation_error = SchemaValidator.validate_document(document, doc_type)
+                # Determine document type
+                doc_type = (
+                    DocumentType.INVENTORY if self.collection_config.name == "inventory"
+                    else DocumentType.TRANSACTION
+                )
+
+                try:
+                    # Attempt to migrate document if needed
+                    document = SchemaMigrator.migrate_document(document, doc_type)
+                except SchemaMigrationError as e:
+                    self.logger.error(
+                        "document_migration_failed",
+                        error=str(e),
+                        operation_type=operation_type,
+                        doc_id=str(document.get("_id"))
+                    )
+                    return
+
+                # Validate migrated document
+                validation_error = SchemaValidator.validate_document(
+                    document,
+                    doc_type.value
+                )
                 
                 if validation_error:
                     self.logger.error(
                         "document_validation_failed",
                         error=validation_error,
                         operation_type=operation_type,
-                        doc_type=doc_type,
+                        doc_type=doc_type.value,
                         doc_id=str(document.get("_id"))
                     )
                     return  # Skip publishing invalid documents
@@ -232,7 +254,8 @@ class ChangeStreamListener:
                 self.topic_path,
                 json.dumps(message, cls=JSONEncoder).encode("utf-8"),
                 collection=self.collection_config.name,
-                operation=operation_type
+                operation=operation_type,
+                schema_version=document.get("_schema_version", "v1") if operation_type != "delete" else "v1"
             )
             
             # Wait for the publish to complete
@@ -244,7 +267,8 @@ class ChangeStreamListener:
                 "change_event_published",
                 operation_type=operation_type,
                 doc_id=str(change.get("documentKey", {}).get("_id")),
-                processing_time=time.time() - self.last_change_time
+                processing_time=time.time() - self.last_change_time,
+                schema_version=document.get("_schema_version", "v1") if operation_type != "delete" else "v1"
             )
 
         except Exception as e:
