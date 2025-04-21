@@ -1,1 +1,0 @@
-"""Apache Beam source components.""" 
