@@ -6,7 +6,6 @@ import time
 from typing import Any, Dict, Optional
 from bson import ObjectId
 
-import structlog
 from google.cloud import firestore, pubsub_v1
 from pymongo import MongoClient
 from pymongo.change_stream import ChangeStream
@@ -15,9 +14,8 @@ from pymongo.errors import PyMongoError
 
 from ..config.config_manager import (ConnectorConfig, MongoDBCollectionConfig,
                                    RetryConfig)
+from ..logging.logging_config import get_logger, add_context_to_logger
 from .schema_validator import SchemaValidator
-
-logger = structlog.get_logger(__name__)
 
 class JSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles MongoDB ObjectId."""
@@ -78,6 +76,19 @@ class ChangeStreamListener:
         self.heartbeat_task: Optional[asyncio.Task] = None
         self.last_change_time = time.time()
 
+        # Initialize logger with context
+        self.logger = get_logger(__name__)
+        self.logger = add_context_to_logger(
+            self.logger,
+            {
+                "collection": collection_config.name,
+                "database": config.mongodb.database,
+                "connector_id": f"connector-{collection_config.name}",
+                "pubsub_topic": collection_config.topic,
+                "status_topic": config.pubsub.status_topic
+            }
+        )
+
     def _load_resume_token(self) -> Optional[Dict[str, Any]]:
         """Load the last resume token from Firestore.
         
@@ -90,7 +101,7 @@ class ChangeStreamListener:
             if doc.exists:
                 return doc.to_dict().get("token")
         except Exception as e:
-            logger.error("Failed to load resume token", error=str(e))
+            self.logger.error("Failed to load resume token", error=str(e))
         return None
 
     def _save_resume_token(self, token: Dict[str, Any]) -> None:
@@ -107,7 +118,7 @@ class ChangeStreamListener:
                 "collection": self.collection_config.name
             })
         except Exception as e:
-            logger.error("Failed to save resume token", error=str(e))
+            self.logger.error("Failed to save resume token", error=str(e))
 
     def _get_resume_token_ref(self) -> firestore.DocumentReference:
         """Get the Firestore document reference for the resume token.
@@ -149,16 +160,18 @@ class ChangeStreamListener:
                     None, future.result
                 )
 
-                logger.debug(
-                    "Published heartbeat",
-                    collection=self.collection_config.name
+                self.logger.debug(
+                    "heartbeat_published",
+                    time_since_last_change=time.time() - self.last_change_time,
+                    has_resume_token=self.last_resume_token is not None
                 )
 
             except Exception as e:
-                logger.error(
-                    "Failed to publish heartbeat",
+                self.logger.error(
+                    "heartbeat_publish_failed",
                     error=str(e),
-                    collection=self.collection_config.name
+                    error_type=type(e).__name__,
+                    exc_info=True
                 )
 
             # Wait for next interval
@@ -178,15 +191,17 @@ class ChangeStreamListener:
             if token := change.get("_id"):
                 self._save_resume_token(token)
 
+            operation_type = change["operationType"]
+            
             # Skip validation for delete operations as they don't contain full documents
-            if change["operationType"] != "delete":
+            if operation_type != "delete":
                 # Get the full document for validation
                 document = change.get("fullDocument")
                 if not document:
-                    logger.warning(
-                        "No full document available for validation",
-                        collection=self.collection_config.name,
-                        operation=change["operationType"]
+                    self.logger.warning(
+                        "document_validation_skipped",
+                        reason="no_full_document",
+                        operation_type=operation_type
                     )
                     return
 
@@ -195,18 +210,19 @@ class ChangeStreamListener:
                 validation_error = SchemaValidator.validate_document(document, doc_type)
                 
                 if validation_error:
-                    logger.error(
-                        "Document failed schema validation",
+                    self.logger.error(
+                        "document_validation_failed",
                         error=validation_error,
-                        collection=self.collection_config.name,
-                        operation=change["operationType"]
+                        operation_type=operation_type,
+                        doc_type=doc_type,
+                        doc_id=str(document.get("_id"))
                     )
                     return  # Skip publishing invalid documents
 
             # Prepare the message
             message = {
                 "collection": self.collection_config.name,
-                "operation": change["operationType"],
+                "operation": operation_type,
                 "timestamp": time.time(),
                 "data": change
             }
@@ -216,7 +232,7 @@ class ChangeStreamListener:
                 self.topic_path,
                 json.dumps(message, cls=JSONEncoder).encode("utf-8"),
                 collection=self.collection_config.name,
-                operation=change["operationType"]
+                operation=operation_type
             )
             
             # Wait for the publish to complete
@@ -224,17 +240,21 @@ class ChangeStreamListener:
                 None, future.result
             )
 
-            logger.info(
-                "Published change event",
-                collection=self.collection_config.name,
-                operation=change["operationType"]
+            self.logger.info(
+                "change_event_published",
+                operation_type=operation_type,
+                doc_id=str(change.get("documentKey", {}).get("_id")),
+                processing_time=time.time() - self.last_change_time
             )
 
         except Exception as e:
-            logger.error(
-                "Failed to handle change event",
+            self.logger.error(
+                "change_event_processing_failed",
                 error=str(e),
-                collection=self.collection_config.name
+                error_type=type(e).__name__,
+                operation_type=change.get("operationType"),
+                doc_id=str(change.get("documentKey", {}).get("_id")),
+                exc_info=True
             )
             raise
 
@@ -248,6 +268,12 @@ class ChangeStreamListener:
                     resume_after=self.last_resume_token
                 )
 
+                self.logger.info(
+                    "change_stream_started",
+                    resume_token=str(self.last_resume_token) if self.last_resume_token else None,
+                    watch_filter=self.collection_config.watch_filter
+                )
+
                 # Process changes
                 async for change in self._aiter_change_stream():
                     await self._handle_change(change)
@@ -256,10 +282,11 @@ class ChangeStreamListener:
                 if not self.is_running:
                     break
 
-                logger.error(
-                    "Error in change stream",
+                self.logger.error(
+                    "change_stream_error",
                     error=str(e),
-                    collection=self.collection_config.name
+                    error_type=type(e).__name__,
+                    exc_info=True
                 )
                 
                 # Wait before retrying
@@ -282,6 +309,13 @@ class ChangeStreamListener:
         retries = 0
 
         while retries < self.retry_config.max_retries:
+            self.logger.info(
+                "retry_backoff",
+                attempt=retries + 1,
+                delay=delay,
+                max_retries=self.retry_config.max_retries
+            )
+            
             await asyncio.sleep(delay)
             
             # Add jitter to avoid thundering herd
@@ -298,10 +332,7 @@ class ChangeStreamListener:
             return
 
         self.is_running = True
-        logger.info(
-            "Starting change stream listener",
-            collection=self.collection_config.name
-        )
+        self.logger.info("change_stream_listener_starting")
 
         # Start heartbeat task if enabled
         if self.config.health.heartbeat.enabled:
@@ -324,10 +355,7 @@ class ChangeStreamListener:
             except asyncio.CancelledError:
                 pass
             
-        logger.info(
-            "Stopped change stream listener",
-            collection=self.collection_config.name
-        )
+        self.logger.info("change_stream_listener_stopped")
 
     async def __aenter__(self) -> 'ChangeStreamListener':
         """Context manager entry."""

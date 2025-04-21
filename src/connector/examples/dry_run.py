@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Dict, Any, Iterator, Optional
 from bson import ObjectId
@@ -24,8 +25,32 @@ from ..config.config_manager import (
     HealthConfig,
     RetryConfig
 )
+from ..logging.logging_config import configure_logging, get_logger
 
-logger = structlog.get_logger(__name__)
+# Configure logging for the test
+configure_logging("DEBUG")
+logger = get_logger(__name__)
+
+class CaptureProcessor:
+    """Processor that captures log messages for validation."""
+    def __init__(self):
+        self.messages = []
+
+    def __call__(self, logger, method_name, event_dict):
+        """Process a log event by storing it and passing it through."""
+        # Store the event dict
+        self.messages.append(event_dict)
+        # Print to console for visibility
+        print(json.dumps(event_dict), file=sys.stderr)
+        # Pass through the event dict unchanged
+        return event_dict
+
+# Add our capture processor to structlog
+capture_processor = CaptureProcessor()
+processors = structlog.get_config()["processors"]
+# Insert our processor before the JSON renderer
+processors.insert(-1, capture_processor)
+structlog.configure(processors=processors)
 
 class JSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles MongoDB ObjectId."""
@@ -52,17 +77,24 @@ class MockChangeStream:
         return self
         
     def __next__(self):
-        if self.closed or not self.changes:
+        if self.closed:
             raise StopIteration
+        
+        if not self.changes:
+            # If we've processed all expected changes, stop
+            if self._processed_count >= self._total_expected:
+                self.closed = True
+                raise StopIteration
+            # Otherwise, simulate waiting for changes
+            return None
+            
         self._processed_count += 1
-        # Stop after processing all expected changes
-        if self._processed_count >= self._total_expected:
-            self.closed = True
         return self.changes.pop(0)
     
     def close(self):
         """Close the change stream."""
         self.closed = True
+        self.changes.clear()
 
 class MockCollection:
     """Mock MongoDB collection with change stream support."""
@@ -189,19 +221,16 @@ class MockPubSubPublisher:
         pass
 
 async def run_dry_test():
-    """Run a dry test of the connector."""
+    """Run a dry test of the connector with logging validation."""
+    
+    logger.info("starting_dry_run_test")
     
     # Get the path to the test config
     current_dir = Path(__file__).parent
     config_path = current_dir / "test_config.yaml"
     
-    # Create mock MongoDB client
+    # Create mock clients
     mongo_client = MockMongoClient()
-    
-    # Get the collection through the mock client
-    collection = mongo_client.test_db.inventory
-    
-    # Start the connector first
     publisher = MockPubSubPublisher()
     firestore_client = MagicMock()
     doc_mock = MagicMock()
@@ -214,84 +243,95 @@ async def run_dry_test():
     coll_mock.document = MagicMock(return_value=doc_ref_mock)
     firestore_client.collection = MagicMock(return_value=coll_mock)
     
-    # Initialize connector with test config
+    # Create a test document
+    test_doc = {
+        "_id": ObjectId(),
+        "product_id": "TEST001",
+        "name": "Test Product",
+        "quantity": 100
+    }
+    
+    # Get the test database and collection
+    db = mongo_client.test_db
+    collection = db.inventory
+    
+    logger.debug("inserting_test_document", doc_id=str(test_doc["_id"]))
+    
+    # Insert the test document
+    collection.insert_one(test_doc)
+    
+    # Update the document
+    logger.debug("updating_test_document", doc_id=str(test_doc["_id"]))
+    collection.update_one(
+        {"_id": test_doc["_id"]},
+        {"$set": {"quantity": 50}}
+    )
+    
+    # Delete the document
+    logger.debug("deleting_test_document", doc_id=str(test_doc["_id"]))
+    collection.delete_one({"_id": test_doc["_id"]})
+    
+    # Start the connector
     connector = MongoDBConnector(str(config_path))
     connector.mongo_client = mongo_client
     connector.publisher = publisher
     connector.firestore_client = firestore_client
     
+    # Run for a short time to process the changes
     try:
-        # Start the connector
-        logger.info("Starting connector dry run")
-        start_task = asyncio.create_task(connector.start())
-        
-        # Wait a bit for the connector to start
-        await asyncio.sleep(1)
-        
-        # Simulate some changes
-        logger.info("Simulating inventory changes")
-        
-        # Create test document
-        test_doc = {
-            "product_id": "PROD-456",
-            "warehouse_id": "WH-1",
-            "quantity": 100,
-            "last_updated": "2024-03-20T10:00:00Z",
-            "sku": "TEST-123",
-            "category": "Electronics",
-            "brand": "TestBrand",
-            "threshold_min": 10,
-            "threshold_max": 200
-        }
-        collection.insert_one(test_doc)
-        
-        # Update document
-        collection.update_one(
-            {"product_id": "PROD-456"},
-            {"$set": {"quantity": 90, "last_updated": "2024-03-20T10:15:00Z"}}
+        async with connector:
+            # Wait for a maximum of 5 seconds or until all changes are processed
+            for _ in range(5):
+                if all(listener.change_stream.closed for listener in connector.listeners.values()):
+                    break
+                await asyncio.sleep(1)
+    except Exception as e:
+        logger.error(
+            "connector_error",
+            error=str(e),
+            error_type=type(e).__name__,
+            exc_info=True
         )
-        
-        # Insert new document
-        collection.insert_one({
-            "product_id": "PROD-789",
-            "warehouse_id": "WH-2",
-            "quantity": 50,
-            "last_updated": "2024-03-20T10:30:00Z",
-            "sku": "TEST-456",
-            "category": "Electronics",
-            "brand": "TestBrand",
-            "threshold_min": 5,
-            "threshold_max": 100
-        })
-        
-        # Delete document
-        collection.delete_one({"sku": "TEST-123"})
-        
-        # Wait for changes to be processed (4 changes: insert, update, insert, delete)
-        await asyncio.sleep(2)
-        
-        # Print published messages
-        logger.info(
-            "Messages that would have been published",
-            count=len(publisher.published_messages)
+        raise
+    
+    # Validate logging
+    logger.info("validating_logs")
+    
+    # Check that we have structured logs with required fields
+    validation_errors = []
+    required_fields = {"timestamp", "level", "event"}
+    
+    for msg in capture_processor.messages:
+        # Check for required fields
+        missing_fields = required_fields - set(msg.keys())
+        if missing_fields:
+            validation_errors.append(f"Missing required fields: {missing_fields}")
+    
+    if validation_errors:
+        logger.error(
+            "log_validation_failed",
+            errors=validation_errors
         )
-        for msg in publisher.published_messages:
-            logger.info("Published message", operation=msg["data"]["operation"])
-            
-    finally:
-        # Stop the connector
-        await connector.stop()
-        logger.info("Connector stopped")
+        raise ValueError("Log validation failed")
+    
+    logger.info(
+        "dry_run_completed",
+        total_logs=len(capture_processor.messages),
+        published_messages=len(publisher.published_messages)
+    )
 
 def main():
-    """Main entry point for dry run."""
+    """Main entry point for the dry run test."""
     try:
         asyncio.run(run_dry_test())
-    except KeyboardInterrupt:
-        logger.info("Dry run interrupted")
     except Exception as e:
-        logger.error("Error during dry run", error=str(e))
-        raise  # Add this to see full traceback
+        logger.error(
+            "dry_run_failed",
+            error=str(e),
+            error_type=type(e).__name__,
+            exc_info=True
+        )
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 

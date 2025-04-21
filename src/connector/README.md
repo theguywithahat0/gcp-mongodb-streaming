@@ -8,10 +8,10 @@ This connector streams real-time changes from MongoDB collections to Google Clou
 - Reliable message delivery to Pub/Sub
 - Document schema validation for data integrity
 - Resume token management for fault tolerance
-- Structured logging and monitoring
-- Health check endpoints
+- Structured logging for operational visibility
 - Comprehensive error handling
 - Configurable connection retry with backoff
+- Health check endpoints
 
 ## Prerequisites
 
@@ -39,11 +39,6 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-4. Run tests:
-```bash
-pytest
-```
-
 ## Configuration
 
 The connector can be configured through environment variables or a YAML configuration file. See `config/config.yaml.example` for available options.
@@ -53,7 +48,32 @@ Key configuration options:
 - Collection watch filters
 - Pub/Sub topic configurations
 - Resume token storage settings
-- Logging and monitoring options
+- Logging configuration
+
+### Structured Logging
+
+The connector uses structured JSON logging for better operational visibility and monitoring:
+
+```json
+{
+    "timestamp": "2024-03-20T10:00:00Z",
+    "level": "INFO",
+    "event": "change_stream_event",
+    "collection": "inventory",
+    "operation": "insert",
+    "warehouse_id": "WH-EAST-1",
+    "document_id": "123456",
+    "correlation_id": "abc-xyz-789"
+}
+```
+
+Standard log fields:
+- `timestamp`: ISO format timestamp
+- `level`: Log severity (DEBUG, INFO, WARNING, ERROR)
+- `event`: Event type identifier
+- `correlation_id`: Unique identifier for tracking related events
+
+Event-specific fields are included based on the operation type and context.
 
 ## Schema Validation
 

@@ -12,8 +12,7 @@ This document provides a component-by-component implementation guide for the E-c
 |--------|------|-------------|
 | ✅ | **Create Cloud Run service project structure** | Create directories for source code, config, tests, and deployment scripts |
 | ✅ | **Set up development environment** | Create Python virtual environment and install dependencies |
-| ⬜ | **Configure service account** | Use Terraform to create service account with required permissions |
-| ⬜ | **Create Firestore collection** | Use Terraform to create resumeTokens collection |
+
 
 ### Core Implementation
 | Status | Task | Description |
@@ -29,10 +28,10 @@ This document provides a component-by-component implementation guide for the E-c
 | Status | Task | Description |
 |--------|------|-------------|
 | ✅ | **Connection retry with backoff** | Implement exponential backoff for connection retries |
-| ⬜ | **Heartbeat mechanism** | Publish status every 30 seconds to verify health |
+| ✅ | **Heartbeat mechanism** | Publish status every 30 seconds to verify health |
 | ✅ | **Error handling** | Implement comprehensive error handling for all operations |
 | ✅ | **Graceful shutdown** | Handle termination signals to ensure clean shutdown |
-| ⬜ | **Structured logging** | Implement JSON-formatted logs with consistent fields |
+| ✅ | **Structured logging** | Implement JSON-formatted logs with consistent fields |
 | ⬜ | **Health check endpoints** | Add /health and /readiness endpoints |
 
 ### Testing & Production Readiness

@@ -4,14 +4,12 @@ import asyncio
 import signal
 from typing import Dict, List, Optional
 
-import structlog
 from google.cloud import firestore, pubsub_v1
 from pymongo import MongoClient
 
 from ..config.config_manager import ConfigurationManager
+from ..logging.logging_config import configure_logging, get_logger, add_context_to_logger
 from .change_stream_listener import ChangeStreamListener
-
-logger = structlog.get_logger(__name__)
 
 class MongoDBConnector:
     """Main connector class that manages multiple change stream listeners."""
@@ -25,6 +23,26 @@ class MongoDBConnector:
         # Load configuration
         self.config_manager = ConfigurationManager(config_path)
         self.config = self.config_manager.get_config()
+
+        # Configure logging
+        configure_logging(self.config.monitoring.logging.get("level", "INFO"))
+        
+        # Initialize logger with context
+        self.logger = get_logger(__name__)
+        self.logger = add_context_to_logger(
+            self.logger,
+            {
+                "project_id": self.config.pubsub.project_id,
+                "database": self.config.mongodb.database,
+                "connector_type": "mongodb_connector"
+            }
+        )
+
+        self.logger.info(
+            "connector_initializing",
+            collections=[c.name for c in self.config.mongodb.collections],
+            mongodb_options=self.config.mongodb.options
+        )
 
         # Initialize clients
         self.mongo_client = MongoClient(
@@ -44,11 +62,20 @@ class MongoDBConnector:
             return
 
         self.running = True
-        logger.info("Starting MongoDB connector")
+        self.logger.info(
+            "connector_starting",
+            num_collections=len(self.config.mongodb.collections)
+        )
 
         # Create listeners for each configured collection
         tasks = []
         for collection_config in self.config.mongodb.collections:
+            self.logger.info(
+                "listener_initializing",
+                collection=collection_config.name,
+                topic=collection_config.topic
+            )
+            
             listener = ChangeStreamListener(
                 config=self.config,
                 collection_config=collection_config,
@@ -68,7 +95,10 @@ class MongoDBConnector:
             return
 
         self.running = False
-        logger.info("Stopping MongoDB connector")
+        self.logger.info(
+            "connector_stopping",
+            num_listeners=len(self.listeners)
+        )
 
         # Stop all listeners
         tasks = [
@@ -81,6 +111,8 @@ class MongoDBConnector:
         self.mongo_client.close()
         self.publisher.close()
 
+        self.logger.info("connector_stopped")
+
     def _setup_signal_handlers(self) -> None:
         """Set up signal handlers for graceful shutdown."""
         loop = asyncio.get_event_loop()
@@ -91,13 +123,21 @@ class MongoDBConnector:
                 lambda s=sig: asyncio.create_task(self._handle_signal(s))
             )
 
+        self.logger.info(
+            "signal_handlers_configured",
+            signals=["SIGTERM", "SIGINT"]
+        )
+
     async def _handle_signal(self, sig: signal.Signals) -> None:
         """Handle termination signals.
         
         Args:
             sig: The signal received.
         """
-        logger.info(f"Received signal {sig.name}")
+        self.logger.info(
+            "signal_received",
+            signal=sig.name
+        )
         await self.stop()
         asyncio.get_event_loop().stop()
 
