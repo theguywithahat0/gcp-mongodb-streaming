@@ -233,25 +233,35 @@ async def run_dry_test():
         
         # Create test document
         test_doc = {
-            "sku": "TEST-123",
             "product_id": "PROD-456",
             "warehouse_id": "WH-1",
-            "current_stock": 100
+            "quantity": 100,
+            "last_updated": "2024-03-20T10:00:00Z",
+            "sku": "TEST-123",
+            "category": "Electronics",
+            "brand": "TestBrand",
+            "threshold_min": 10,
+            "threshold_max": 200
         }
         collection.insert_one(test_doc)
         
         # Update document
         collection.update_one(
-            {"sku": "TEST-123"},
-            {"$set": {"current_stock": 90}}
+            {"product_id": "PROD-456"},
+            {"$set": {"quantity": 90, "last_updated": "2024-03-20T10:15:00Z"}}
         )
         
         # Insert new document
         collection.insert_one({
-            "sku": "TEST-456",
             "product_id": "PROD-789",
-            "warehouse_id": "WH-1",
-            "current_stock": 50
+            "warehouse_id": "WH-2",
+            "quantity": 50,
+            "last_updated": "2024-03-20T10:30:00Z",
+            "sku": "TEST-456",
+            "category": "Electronics",
+            "brand": "TestBrand",
+            "threshold_min": 5,
+            "threshold_max": 100
         })
         
         # Delete document

@@ -6,6 +6,7 @@ This connector streams real-time changes from MongoDB collections to Google Clou
 
 - Real-time MongoDB change stream monitoring
 - Reliable message delivery to Pub/Sub
+- Document schema validation for data integrity
 - Resume token management for fault tolerance
 - Structured logging and monitoring
 - Health check endpoints
@@ -54,6 +55,40 @@ Key configuration options:
 - Resume token storage settings
 - Logging and monitoring options
 
+## Schema Validation
+
+The connector includes built-in schema validation for inventory and transaction documents:
+
+### Inventory Documents
+Required fields:
+- `product_id` (string): Unique identifier for the product
+- `warehouse_id` (string): Identifier for the warehouse
+- `quantity` (integer): Current stock quantity (minimum: 0)
+- `last_updated` (string): Timestamp in ISO format (e.g., "2024-03-20T10:00:00Z")
+
+Optional fields:
+- `category` (string): Product category
+- `brand` (string): Product brand
+- `sku` (string): Stock keeping unit
+- `threshold_min` (integer): Minimum stock threshold
+- `threshold_max` (integer): Maximum stock threshold
+
+### Transaction Documents
+Required fields:
+- `transaction_id` (string): Unique identifier for the transaction
+- `product_id` (string): Product identifier
+- `warehouse_id` (string): Warehouse identifier
+- `quantity` (integer): Transaction quantity
+- `transaction_type` (string): One of: "sale", "restock", "return", "adjustment"
+- `timestamp` (string): Transaction timestamp in ISO format
+
+Optional fields:
+- `order_id` (string): Associated order identifier
+- `customer_id` (string): Customer identifier
+- `notes` (string): Additional transaction notes
+
+Invalid documents are logged and not published to Pub/Sub. This ensures data quality and consistency throughout the pipeline.
+
 ## Running the Connector
 
 Development:
@@ -85,7 +120,7 @@ The connector exposes the following endpoints:
 ## Architecture
 
 The connector follows a modular architecture:
-- `core/`: Core connector logic
+- `core/`: Core connector logic and schema validation
 - `config/`: Configuration management
 - `utils/`: Utility functions
 - `tests/`: Test suite

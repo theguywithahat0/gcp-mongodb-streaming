@@ -15,6 +15,7 @@ from pymongo.errors import PyMongoError
 
 from ..config.config_manager import (ConnectorConfig, MongoDBCollectionConfig,
                                    RetryConfig)
+from .schema_validator import SchemaValidator
 
 logger = structlog.get_logger(__name__)
 
@@ -122,6 +123,31 @@ class ChangeStreamListener:
             # Extract the resume token
             if token := change.get("_id"):
                 self._save_resume_token(token)
+
+            # Skip validation for delete operations as they don't contain full documents
+            if change["operationType"] != "delete":
+                # Get the full document for validation
+                document = change.get("fullDocument")
+                if not document:
+                    logger.warning(
+                        "No full document available for validation",
+                        collection=self.collection_config.name,
+                        operation=change["operationType"]
+                    )
+                    return
+
+                # Determine document type and validate
+                doc_type = "inventory" if self.collection_config.name == "inventory" else "transaction"
+                validation_error = SchemaValidator.validate_document(document, doc_type)
+                
+                if validation_error:
+                    logger.error(
+                        "Document failed schema validation",
+                        error=validation_error,
+                        collection=self.collection_config.name,
+                        operation=change["operationType"]
+                    )
+                    return  # Skip publishing invalid documents
 
             # Prepare the message
             message = {

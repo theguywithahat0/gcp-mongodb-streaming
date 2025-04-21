@@ -23,7 +23,7 @@ This document provides a component-by-component implementation guide for the E-c
 | ✅ | **Message transformation** | Implement MongoDB document → Pub/Sub message conversion |
 | ✅ | **Resume token management** | Store and retrieve resume tokens for fault tolerance |
 | ✅ | **Warehouse ID tagging** | Add source identification to all messages |
-| ⬜ | **Document schema validation** | Validate documents against JSON schemas before processing |
+| ✅ | **Document schema validation** | Validate documents against JSON schemas before processing |
 
 ### Reliability Features
 | Status | Task | Description |
