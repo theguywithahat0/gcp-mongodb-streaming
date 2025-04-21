@@ -2,14 +2,16 @@
 
 import asyncio
 import signal
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from google.cloud import firestore, pubsub_v1
 from pymongo import MongoClient
+import uvicorn
 
 from ..config.config_manager import ConfigurationManager
-from ..logging.logging_config import configure_logging, get_logger, add_context_to_logger
+from ..logging.logging_config import get_logger, add_context_to_logger
 from .change_stream_listener import ChangeStreamListener
+from ..health.health_check import app, health_check
 
 class MongoDBConnector:
     """Main connector class that manages multiple change stream listeners."""
@@ -21,29 +23,8 @@ class MongoDBConnector:
             config_path: Optional path to the configuration file.
         """
         # Load configuration
-        self.config_manager = ConfigurationManager(config_path)
-        self.config = self.config_manager.get_config()
-
-        # Configure logging
-        configure_logging(self.config.monitoring.logging.get("level", "INFO"))
+        self.config = ConfigurationManager(config_path).config
         
-        # Initialize logger with context
-        self.logger = get_logger(__name__)
-        self.logger = add_context_to_logger(
-            self.logger,
-            {
-                "project_id": self.config.pubsub.project_id,
-                "database": self.config.mongodb.database,
-                "connector_type": "mongodb_connector"
-            }
-        )
-
-        self.logger.info(
-            "connector_initializing",
-            collections=[c.name for c in self.config.mongodb.collections],
-            mongodb_options=self.config.mongodb.options
-        )
-
         # Initialize clients
         self.mongo_client = MongoClient(
             self.config.mongodb.uri,
@@ -52,12 +33,25 @@ class MongoDBConnector:
         self.publisher = pubsub_v1.PublisherClient()
         self.firestore_client = firestore.Client()
 
-        # Initialize listeners
-        self.listeners: Dict[str, ChangeStreamListener] = {}
+        # Initialize state
         self.running = False
+        self.listeners: Dict[str, ChangeStreamListener] = {}
+
+        # Initialize logger
+        self.logger = get_logger(__name__)
+        self.logger = add_context_to_logger(
+            self.logger,
+            {
+                "service": "mongodb-connector",
+                "version": "1.0.0"
+            }
+        )
+
+        # Register with health check
+        health_check.register_connector(self)
 
     async def start(self) -> None:
-        """Start all configured change stream listeners."""
+        """Start all configured change stream listeners and the health check server."""
         if self.running:
             return
 
@@ -86,7 +80,18 @@ class MongoDBConnector:
             self.listeners[collection_config.name] = listener
             tasks.append(listener.start())
 
-        # Start all listeners
+        # Start health check server
+        health_server = uvicorn.Server(
+            config=uvicorn.Config(
+                app=app,
+                host="0.0.0.0",
+                port=8080,
+                log_level="info"
+            )
+        )
+        tasks.append(health_server.serve())
+
+        # Start all tasks
         await asyncio.gather(*tasks)
 
     async def stop(self) -> None:

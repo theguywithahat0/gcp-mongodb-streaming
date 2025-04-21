@@ -1,17 +1,17 @@
 # MongoDB driver
-pymongo>=4.5.0
+pymongo>=4.3.3
 
 # Google Cloud dependencies
-google-cloud-pubsub>=2.18.0
-google-cloud-firestore>=2.13.0
+google-cloud-pubsub>=2.13.0
+google-cloud-firestore>=2.7.2
 
 # Configuration and environment
-python-dotenv>=1.0.0
-pyyaml>=6.0.1
+python-dotenv>=0.19.2
+pyyaml>=6.0
 jsonschema>=4.19.0
 
 # Logging and monitoring
-structlog>=23.2.0
+structlog>=22.1.0
 opentelemetry-api>=1.20.0
 opentelemetry-sdk>=1.20.0
 opentelemetry-instrumentation-pymongo>=0.41b0
@@ -26,3 +26,7 @@ mongomock>=4.1.2
 mypy>=1.5.1
 types-PyYAML>=6.0.12.12
 pymongo-stubs>=0.2.0
+
+# FastAPI and uvicorn
+fastapi>=0.95.0
+uvicorn>=0.21.0
