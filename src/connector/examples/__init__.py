@@ -1,0 +1,1 @@
+"""Examples package for MongoDB Change Stream Connector.""" 

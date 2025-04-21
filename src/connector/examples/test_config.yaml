@@ -1,0 +1,34 @@
+mongodb:
+  uri: "mongodb://localhost:27017"
+  database: "test_db"
+  collections:
+    - name: "inventory"
+      topic: "inventory-updates"
+      watch_filter: []
+  options: {}
+
+pubsub:
+  project_id: "test-project"
+  default_topic_settings: {}
+  publisher:
+    batch_settings: {}
+    retry_settings: {}
+
+firestore:
+  collection: "resume_tokens"
+  ttl: 3600
+
+monitoring:
+  logging: {}
+  tracing: {}
+
+health:
+  endpoints: {}
+  readiness: {}
+
+retry:
+  initial_delay: 1.0
+  max_delay: 60.0
+  multiplier: 2.0
+  jitter: 0.2
+  max_retries: 5 
