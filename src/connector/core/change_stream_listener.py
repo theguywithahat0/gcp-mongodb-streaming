@@ -20,17 +20,12 @@ from .schema_registry import DocumentType
 from .schema_migrator import SchemaMigrator, SchemaMigrationError
 from .document_transformer import (
     DocumentTransformer, TransformStage, TransformationError,
-    add_processing_metadata
+    add_processing_metadata, add_field_prefix, remove_sensitive_fields
 )
 from .message_batcher import MessageBatcher, Message
 from .message_deduplication import MessageDeduplication, DeduplicationConfig
-
-class JSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder that handles MongoDB ObjectId."""
-    def default(self, obj):
-        if isinstance(obj, ObjectId):
-            return str(obj)
-        return super().default(obj)
+from ..utils.json_utils import MongoDBJSONEncoder
+from ..utils.error_utils import with_retries, wrap_error, ErrorCategory, ConnectorError
 
 class ChangeStreamListener:
     """Listens to MongoDB change streams and publishes events to Pub/Sub."""
@@ -99,6 +94,42 @@ class ChangeStreamListener:
 
         # Initialize document transformer
         self.transformer = DocumentTransformer()
+        
+        # Register security transformations based on document type
+        if collection_config.name == "inventory":
+            # For inventory documents
+            self.transformer.register_transform(
+                TransformStage.PRE_PUBLISH,
+                DocumentType.INVENTORY,
+                add_field_prefix(f"wh_{config.mongodb.warehouse_id}_")
+            )
+        else:
+            # For transaction documents
+            # Remove sensitive customer information before publishing
+            self.transformer.register_transform(
+                TransformStage.PRE_PUBLISH,
+                DocumentType.TRANSACTION,
+                remove_sensitive_fields([
+                    "customer_email",
+                    "customer_phone",
+                    "customer.address",
+                    "payment.card_number",
+                    "payment.cvv",
+                    "shipping.address"
+                ])
+            )
+            # Add warehouse prefix for data isolation
+            self.transformer.register_transform(
+                TransformStage.PRE_PUBLISH,
+                DocumentType.TRANSACTION,
+                add_field_prefix(f"wh_{config.mongodb.warehouse_id}_", [
+                    "product_id",
+                    "warehouse_id",
+                    "location",
+                    "shelf"
+                ])
+            )
+
         # Register default transformations
         self.transformer.register_transform(
             TransformStage.PRE_PUBLISH,
@@ -146,7 +177,17 @@ class ChangeStreamListener:
             if doc.exists:
                 return doc.to_dict().get("token")
         except Exception as e:
-            self.logger.error("Failed to load resume token", error=str(e))
+            wrapped_error = wrap_error(e, {
+                "component": "change_stream_listener",
+                "operation": "load_resume_token"
+            })
+            logger.error(
+                "Failed to load resume token",
+                extra={
+                    "error": str(wrapped_error),
+                    "category": wrapped_error.category.value
+                }
+            )
         return None
 
     def _save_resume_token(self, token: Dict[str, Any]) -> None:
@@ -163,7 +204,17 @@ class ChangeStreamListener:
                 "collection": self.collection_config.name
             })
         except Exception as e:
-            self.logger.error("Failed to save resume token", error=str(e))
+            wrapped_error = wrap_error(e, {
+                "component": "change_stream_listener",
+                "operation": "save_resume_token"
+            })
+            logger.error(
+                "Failed to save resume token",
+                extra={
+                    "error": str(wrapped_error),
+                    "category": wrapped_error.category.value
+                }
+            )
 
     def _get_resume_token_ref(self) -> firestore.DocumentReference:
         """Get the Firestore document reference for the resume token.
@@ -195,7 +246,7 @@ class ChangeStreamListener:
                 # Publish to status topic
                 future = self.publisher.publish(
                     self.status_topic_path,
-                    json.dumps(message, cls=JSONEncoder).encode("utf-8"),
+                    json.dumps(message, cls=MongoDBJSONEncoder).encode("utf-8"),
                     message_type="heartbeat",
                     collection=self.collection_config.name
                 )
@@ -242,21 +293,36 @@ class ChangeStreamListener:
 
             # Check for duplicates if deduplication is enabled
             if self.deduplication and document_key:
-                is_duplicate = self.deduplication.is_duplicate(
-                    str(document_key),
-                    operation_type,
-                    timestamp
-                )
-                if is_duplicate:
-                    self.logger.info(
-                        "Skipping duplicate message",
+                try:
+                    is_duplicate = self.deduplication.is_duplicate(
+                        str(document_key),
+                        operation_type,
+                        timestamp
+                    )
+                    if is_duplicate:
+                        self.logger.info(
+                            "Skipping duplicate message",
+                            extra={
+                                "operation_type": operation_type,
+                                "doc_id": str(document_key),
+                                "timestamp": timestamp
+                            }
+                        )
+                        return
+                except Exception as e:
+                    wrapped_error = wrap_error(e, {
+                        "component": "change_stream_listener",
+                        "operation": "check_duplicate",
+                        "doc_id": str(document_key)
+                    })
+                    logger.error(
+                        "Failed to check for duplicate message",
                         extra={
-                            "operation_type": operation_type,
-                            "doc_id": str(document_key),
-                            "timestamp": timestamp
+                            "error": str(wrapped_error),
+                            "category": wrapped_error.category.value
                         }
                     )
-                    return
+                    # Continue processing if deduplication fails
             
             # Get document for validation (if applicable)
             document = None
@@ -293,30 +359,45 @@ class ChangeStreamListener:
                     )
 
                 except (TransformationError, SchemaMigrationError) as e:
-                    self.logger.error(
+                    wrapped_error = wrap_error(e, {
+                        "component": "change_stream_listener",
+                        "operation": "transform_document",
+                        "doc_id": str(document.get("_id")),
+                        "operation_type": operation_type
+                    })
+                    logger.error(
                         "Document processing failed",
                         extra={
-                            "error": str(e),
-                            "operation_type": operation_type,
-                            "doc_id": str(document.get("_id"))
+                            "error": str(wrapped_error),
+                            "category": wrapped_error.category.value
                         }
                     )
                     return
 
                 # Validate migrated document
-                validation_error = SchemaValidator.validate_document(
-                    document,
-                    doc_type.value
+                is_valid = (
+                    SchemaValidator.is_valid_inventory(document)
+                    if doc_type == DocumentType.INVENTORY
+                    else SchemaValidator.is_valid_transaction(document)
                 )
                 
-                if validation_error:
-                    self.logger.error(
+                if not is_valid:
+                    wrapped_error = ConnectorError(
+                        message="Document failed schema validation",
+                        category=ErrorCategory.NON_RETRYABLE_DATA,
+                        context={
+                            "component": "change_stream_listener",
+                            "operation": "validate_document",
+                            "doc_id": str(document.get("_id")),
+                            "doc_type": doc_type.value,
+                            "operation_type": operation_type
+                        }
+                    )
+                    logger.error(
                         "Document validation failed",
                         extra={
-                            "error": validation_error,
-                            "operation_type": operation_type,
-                            "doc_type": doc_type.value,
-                            "doc_id": str(document.get("_id"))
+                            "error": str(wrapped_error),
+                            "category": wrapped_error.category.value
                         }
                     )
                     return  # Skip publishing invalid documents
@@ -329,12 +410,17 @@ class ChangeStreamListener:
                         TransformStage.PRE_PUBLISH
                     )
                 except TransformationError as e:
-                    self.logger.error(
+                    wrapped_error = wrap_error(e, {
+                        "component": "change_stream_listener",
+                        "operation": "pre_publish_transform",
+                        "doc_id": str(document.get("_id")),
+                        "operation_type": operation_type
+                    })
+                    logger.error(
                         "Pre-publish transform failed",
                         extra={
-                            "error": str(e),
-                            "operation_type": operation_type,
-                            "doc_id": str(document.get("_id"))
+                            "error": str(wrapped_error),
+                            "category": wrapped_error.category.value
                         }
                     )
                     return
@@ -374,16 +460,20 @@ class ChangeStreamListener:
             )
 
         except Exception as e:
-            self.logger.error(
+            wrapped_error = wrap_error(e, {
+                "component": "change_stream_listener",
+                "operation": "handle_change",
+                "doc_id": str(change.get("documentKey", {}).get("_id")),
+                "operation_type": change.get("operationType")
+            })
+            logger.error(
                 "Change event processing failed",
                 extra={
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                    "operation_type": change.get("operationType"),
-                    "doc_id": str(change.get("documentKey", {}).get("_id"))
+                    "error": str(wrapped_error),
+                    "category": wrapped_error.category.value
                 }
             )
-            raise
+            raise wrapped_error
 
     async def _watch_collection(self) -> None:
         """Watch the collection for changes."""
@@ -422,17 +512,28 @@ class ChangeStreamListener:
                 if not self.is_running:
                     break
 
-                self.logger.error(
+                wrapped_error = wrap_error(e, {
+                    "component": "change_stream_listener",
+                    "operation": "watch_collection"
+                })
+                logger.error(
                     "change_stream_error",
                     extra={
-                        "error": str(e),
-                        "error_type": type(e).__name__,
-                        "exc_info": True
+                        "error": str(wrapped_error),
+                        "category": wrapped_error.category.value
                     }
                 )
                 
-                # Wait before retrying
-                await self._wait_with_backoff()
+                # Wait before retrying if error is retryable
+                if wrapped_error.category in {
+                    ErrorCategory.RETRYABLE_TRANSIENT,
+                    ErrorCategory.RETRYABLE_RESOURCE
+                }:
+                    await self._wait_with_backoff()
+                else:
+                    # Non-retryable error, stop the listener
+                    self.is_running = False
+                    break
 
     async def _aiter_change_stream(self):
         """Async iterator for the change stream."""

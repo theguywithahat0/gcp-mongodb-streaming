@@ -198,36 +198,97 @@ def add_processing_metadata(doc: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
 
-def remove_sensitive_fields(fields: List[str]) -> TransformFunc:
-    """Create a transformation that removes sensitive fields.
+def remove_sensitive_fields(fields_to_remove: List[str]) -> TransformFunc:
+    """Create a transformation function that removes sensitive fields.
     
     Args:
-        fields: List of field names to remove.
+        fields_to_remove: List of field names to remove from the document.
         
     Returns:
-        A transformation function.
+        A transformation function that removes specified fields.
+        
+    Example:
+        ```python
+        remove_pii = remove_sensitive_fields(['customer_email', 'phone_number'])
+        transformer.register_transform(
+            TransformStage.PRE_PUBLISH,
+            DocumentType.TRANSACTION,
+            remove_pii
+        )
+        ```
     """
     def transform(doc: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: v for k, v in doc.items() if k not in fields}
-    transform.__name__ = f"remove_fields_{','.join(fields)}"
+        result = doc.copy()
+        for field in fields_to_remove:
+            # Handle nested fields using dot notation
+            parts = field.split('.')
+            current = result
+            for i, part in enumerate(parts[:-1]):
+                if part in current and isinstance(current[part], dict):
+                    current = current[part]
+                else:
+                    break
+            else:
+                # Remove the field if it exists
+                if parts[-1] in current:
+                    del current[parts[-1]]
+        
+        # Add metadata about removed fields
+        if "_security_metadata" not in result:
+            result["_security_metadata"] = {}
+        result["_security_metadata"]["removed_fields"] = fields_to_remove
+        result["_security_metadata"]["sanitized_at"] = datetime.utcnow().isoformat()
+        
+        return result
+    
+    transform.__name__ = f"remove_sensitive_fields_{','.join(fields_to_remove)}"
     return transform
 
 def add_field_prefix(prefix: str, fields: Optional[List[str]] = None) -> TransformFunc:
-    """Create a transformation that adds a prefix to field names.
+    """Create a transformation function that adds a prefix to field names.
     
     Args:
-        prefix: The prefix to add.
-        fields: Optional list of fields to prefix. If None, prefixes all fields.
+        prefix: The prefix to add to field names.
+        fields: Optional list of specific fields to prefix. If None, prefixes all fields
+               except metadata fields.
         
     Returns:
-        A transformation function.
+        A transformation function that adds prefixes to specified fields.
+        
+    Example:
+        ```python
+        add_warehouse_prefix = add_field_prefix('wh_123_')
+        transformer.register_transform(
+            TransformStage.PRE_PUBLISH,
+            DocumentType.INVENTORY,
+            add_warehouse_prefix
+        )
+        ```
     """
     def transform(doc: Dict[str, Any]) -> Dict[str, Any]:
-        if fields is None:
-            return {f"{prefix}{k}": v for k, v in doc.items()}
-        return {
-            f"{prefix}{k}" if k in fields else k: v
-            for k, v in doc.items()
+        result = {}
+        # Fields that should never be prefixed
+        protected_fields = {
+            "_id", "_processing_metadata", "_security_metadata", 
+            "_schema_version", "document_type"
         }
-    transform.__name__ = f"add_prefix_{prefix}"
+        
+        for key, value in doc.items():
+            if key in protected_fields:
+                result[key] = value
+            elif fields is None or key in fields:
+                # Only prefix if no fields specified or key is in fields list
+                result[f"{prefix}{key}"] = value
+            else:
+                result[key] = value
+                
+        # Add metadata about prefixing
+        if "_security_metadata" not in result:
+            result["_security_metadata"] = {}
+        result["_security_metadata"]["field_prefix"] = prefix
+        result["_security_metadata"]["prefixed_at"] = datetime.utcnow().isoformat()
+        
+        return result
+    
+    transform.__name__ = f"add_field_prefix_{prefix}"
     return transform 
