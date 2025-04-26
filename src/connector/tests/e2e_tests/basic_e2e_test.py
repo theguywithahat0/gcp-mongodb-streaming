@@ -1,0 +1,222 @@
+"""Basic end-to-end test for MongoDB Change Stream to Pub/Sub connector."""
+
+import asyncio
+import json
+import logging
+import os
+from datetime import datetime, UTC
+
+from google.cloud import firestore, pubsub_v1
+from pymongo import MongoClient
+
+from connector.config.config_manager import (
+    ConnectorConfig,
+    MongoDBConfig,
+    PubSubConfig,
+    FirestoreConfig,
+    MongoDBCollectionConfig,
+    PublisherConfig,
+    BatchSettings,
+    HealthConfig,
+    HealthEndpointsConfig,
+    ReadinessConfig,
+    HeartbeatConfig
+)
+from connector.core.change_stream_listener import ChangeStreamListener
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+async def wait_for_operation(received_messages, expected_operation, timeout=10):
+    """Wait for a specific operation to be received."""
+    start_time = datetime.now()
+    while (datetime.now() - start_time).total_seconds() < timeout:
+        for msg in received_messages:
+            if msg['operation'] == expected_operation:
+                return True
+        await asyncio.sleep(0.1)
+    return False
+
+async def run_test():
+    """Run a simple end-to-end test."""
+    try:
+        # Connect to MongoDB
+        mongo_client = MongoClient('mongodb://localhost:27017/?replicaSet=rs0')
+        db = mongo_client.test
+        collection = db.test_collection
+        
+        # Clear existing data
+        collection.delete_many({})
+        logger.info("Connected to MongoDB and cleared test collection")
+
+        # Initialize Pub/Sub (using emulator)
+        publisher = pubsub_v1.PublisherClient()
+        topic_path = publisher.topic_path('test-project', 'test-topic')
+        
+        try:
+            publisher.create_topic(request={"name": topic_path})
+        except Exception:
+            logger.info(f"Topic already exists: {topic_path}")
+
+        # Initialize subscriber
+        subscriber = pubsub_v1.SubscriberClient()
+        subscription_path = subscriber.subscription_path('test-project', 'test-sub')
+        
+        try:
+            subscriber.create_subscription(
+                request={"name": subscription_path, "topic": topic_path}
+            )
+        except Exception:
+            logger.info(f"Subscription already exists: {subscription_path}")
+
+        # Initialize Firestore (using emulator)
+        os.environ['FIRESTORE_EMULATOR_HOST'] = 'localhost:8086'
+        firestore_client = firestore.Client(project='test-project')
+
+        # Basic connector config
+        config = ConnectorConfig(
+            mongodb=MongoDBConfig(
+                uri="mongodb://localhost:27017/?replicaSet=rs0",
+                database="test",
+                collections=[
+                    MongoDBCollectionConfig(
+                        name="test_collection",
+                        topic="test-topic",
+                        watch_full_document=True
+                    )
+                ]
+            ),
+            pubsub=PubSubConfig(
+                project_id='test-project',
+                publisher=PublisherConfig(
+                    batch_settings=BatchSettings(
+                        max_messages=100,
+                        max_bytes=1024 * 1024,
+                        max_latency=2.0
+                    )
+                )
+            ),
+            firestore=FirestoreConfig(
+                collection='message_dedup',
+                ttl=86400  # 24 hours
+            ),
+            health=HealthConfig(
+                endpoints=HealthEndpointsConfig(
+                    health="/health",
+                    readiness="/readiness",
+                    metrics="/metrics"
+                ),
+                readiness=ReadinessConfig(timeout=5),
+                heartbeat=HeartbeatConfig(enabled=False)
+            )
+        )
+
+        # Initialize and start change stream listener
+        listener = ChangeStreamListener(
+            config=config,
+            collection_config=config.mongodb.collections[0],
+            mongo_client=mongo_client,
+            publisher=publisher,
+            firestore_client=firestore_client
+        )
+
+        # Start the listener
+        listener_task = asyncio.create_task(listener.start())
+        await asyncio.sleep(2)  # Wait for listener to be ready
+        logger.info("Change stream listener started")
+
+        # Store received messages and test start time
+        received_messages = []
+        test_start_time = datetime.now(UTC)
+
+        def message_callback(message):
+            data = json.loads(message.data.decode('utf-8'))
+            # Only process messages from after our test started
+            if 'data' in data and 'wallTime' in data['data']:
+                try:
+                    wall_time = datetime.fromisoformat(data['data']['wallTime'])
+                    # Ensure wall_time is timezone-aware
+                    if wall_time.tzinfo is None:
+                        wall_time = wall_time.replace(tzinfo=UTC)
+                    if wall_time >= test_start_time:
+                        logger.info(f"Received message: {data}")
+                        received_messages.append(data)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error processing message timestamp: {e}")
+            message.ack()
+
+        # Start subscriber
+        future = subscriber.subscribe(subscription_path, message_callback)
+        logger.info("Started Pub/Sub subscriber")
+
+        # Wait a moment for the subscriber to be ready
+        await asyncio.sleep(2)
+
+        try:
+            # Test 1: Insert document
+            test_doc = {
+                "_id": "test1",
+                "_schema_version": "v1",
+                "transaction_id": "T123",
+                "product_id": "P123",
+                "warehouse_id": "W1",
+                "quantity": 10,
+                "transaction_type": "sale",
+                "timestamp": datetime.now(UTC).isoformat(),
+                "order_id": "O123",
+                "customer_id": "C123",
+                "notes": "Test transaction"
+            }
+            collection.insert_one(test_doc)
+            logger.info("Inserted test document")
+            
+            # Wait for insert operation to be confirmed
+            assert await wait_for_operation(received_messages, 'insert'), "Insert operation not received"
+            logger.info("Insert operation confirmed")
+
+            # Test 2: Update document
+            collection.update_one(
+                {"_id": "test1"},
+                {"$set": {
+                    "quantity": 15,
+                    "notes": "Updated test transaction",
+                    "timestamp": datetime.now(UTC).isoformat()
+                }}
+            )
+            logger.info("Updated test document")
+            
+            # Wait for update operation to be confirmed
+            assert await wait_for_operation(received_messages, 'update'), "Update operation not received"
+            logger.info("Update operation confirmed")
+
+            # Test 3: Delete document
+            collection.delete_one({"_id": "test1"})
+            logger.info("Deleted test document")
+            
+            # Wait for delete operation to be confirmed
+            assert await wait_for_operation(received_messages, 'delete'), "Delete operation not received"
+            logger.info("Delete operation confirmed")
+
+            # Verify results
+            logger.info(f"Received {len(received_messages)} messages:")
+            for msg in received_messages:
+                logger.info(f"Operation: {msg['operation']}")
+
+            # Basic assertions
+            assert len(received_messages) == 3, f"Expected 3 messages, got {len(received_messages)}"
+            
+            logger.info("All test assertions passed!")
+
+        finally:
+            # Cleanup
+            await listener.stop()
+            future.cancel()
+            collection.delete_many({})
+
+    except Exception as e:
+        logger.error(f"Test failed: {str(e)}")
+        raise
+
+if __name__ == "__main__":
+    asyncio.run(run_test()) 
