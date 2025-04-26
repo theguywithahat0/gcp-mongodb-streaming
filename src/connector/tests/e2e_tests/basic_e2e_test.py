@@ -79,6 +79,7 @@ async def run_test():
             mongodb=MongoDBConfig(
                 uri="mongodb://localhost:27017/?replicaSet=rs0",
                 database="test",
+                warehouse_id="TEST_WH",
                 collections=[
                     MongoDBCollectionConfig(
                         name="test_collection",

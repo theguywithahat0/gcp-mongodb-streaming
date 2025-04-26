@@ -14,17 +14,10 @@ from google.cloud.pubsub_v1.types import BatchSettings
 
 from ..config.config_manager import PublisherConfig
 from ..logging.logging_config import get_logger
+from ..utils.json_utils import MongoDBJSONEncoder
+from ..utils.error_utils import with_retries, wrap_error, ErrorCategory, ConnectorError
 
 logger = get_logger(__name__)
-
-class MongoJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder that handles MongoDB types."""
-    def default(self, obj):
-        if isinstance(obj, Timestamp):
-            return obj.time
-        if isinstance(obj, datetime):
-            return obj.isoformat()
-        return super().default(obj)
 
 @dataclass
 class Message:
@@ -126,7 +119,45 @@ class MessageBatcher:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error in publish loop: {e}", exc_info=True)
+                wrapped_error = wrap_error(e, {
+                    "component": "message_batcher",
+                    "operation": "publish_loop"
+                })
+                logger.error(
+                    "Error in publish loop",
+                    extra={
+                        "error": str(wrapped_error),
+                        "category": wrapped_error.category.value
+                    },
+                    exc_info=True
+                )
+
+    async def _publish_single_message(self, message: Message, context: Dict[str, Any]):
+        """Publish a single message with retries.
+        
+        Args:
+            message: The message to publish
+            context: Context information for error handling
+        
+        Returns:
+            str: The message ID
+        """
+        async def publish():
+            data = json.dumps(message.data, cls=MongoDBJSONEncoder).encode("utf-8")
+            future = self.publisher.publish(
+                self.topic_path,
+                data=data,
+                **message.attributes if message.attributes else {}
+            )
+            return await asyncio.to_thread(future.result)
+        
+        return await with_retries(
+            publish,
+            max_retries=3,
+            initial_delay=1.0,
+            max_delay=10.0,
+            context=context
+        )
 
     async def _publish_batch(self):
         """Publish the current batch of messages."""
@@ -138,43 +169,89 @@ class MessageBatcher:
             self.batch = []
         
         try:
-            # Publish messages in parallel
-            publish_futures = []
+            # Publish messages in parallel with retries
+            publish_tasks = []
             
-            for message in messages_to_publish:
-                data = json.dumps(message.data, cls=MongoJSONEncoder).encode("utf-8")
-                future = self.publisher.publish(
-                    self.topic_path,
-                    data=data,
-                    **message.attributes if message.attributes else {}
-                )
-                publish_futures.append(future)
+            for i, message in enumerate(messages_to_publish):
+                context = {
+                    "component": "message_batcher",
+                    "operation": "publish_message",
+                    "batch_index": i,
+                    "batch_size": len(messages_to_publish),
+                    "topic": self.topic
+                }
+                task = self._publish_single_message(message, context)
+                publish_tasks.append(task)
             
             # Wait for all publishes to complete
-            results = await asyncio.gather(
-                *[asyncio.to_thread(future.result) for future in publish_futures],
-                return_exceptions=True
-            )
+            results = await asyncio.gather(*publish_tasks, return_exceptions=True)
             
             # Check for errors
+            failed_messages = []
             for i, result in enumerate(results):
                 if isinstance(result, Exception):
+                    if isinstance(result, ConnectorError):
+                        error = result
+                    else:
+                        error = wrap_error(result, {
+                            "component": "message_batcher",
+                            "operation": "publish_message",
+                            "batch_index": i,
+                            "batch_size": len(messages_to_publish),
+                            "topic": self.topic
+                        })
                     logger.error(
-                        f"Failed to publish message: {result}",
-                        extra={"message": messages_to_publish[i].data},
-                        exc_info=True
+                        "Failed to publish message",
+                        extra={
+                            "error": str(error),
+                            "category": error.category.value,
+                            "message": messages_to_publish[i].data
+                        }
                     )
+                    failed_messages.append(messages_to_publish[i])
+            
+            # Add failed messages back to the batch if they're retryable
+            if failed_messages:
+                async with self.batch_lock:
+                    retryable_messages = [
+                        msg for msg, result in zip(failed_messages, results)
+                        if isinstance(result, Exception) and 
+                        (isinstance(result, ConnectorError) and result.category in {
+                            ErrorCategory.RETRYABLE_TRANSIENT,
+                            ErrorCategory.RETRYABLE_RESOURCE
+                        })
+                    ]
+                    if retryable_messages:
+                        self.batch = retryable_messages + self.batch
             
             self.last_publish_time = datetime.now()
             logger.debug(
-                f"Published {len(messages_to_publish)} messages",
+                "Published messages",
                 extra={
                     "batch_size": len(messages_to_publish),
+                    "failed": len(failed_messages),
                     "topic": self.topic
                 }
             )
         except Exception as e:
-            logger.error(f"Error publishing batch: {e}", exc_info=True)
-            # Add messages back to the batch
-            async with self.batch_lock:
-                self.batch = messages_to_publish + self.batch 
+            wrapped_error = wrap_error(e, {
+                "component": "message_batcher",
+                "operation": "publish_batch",
+                "batch_size": len(messages_to_publish),
+                "topic": self.topic
+            })
+            logger.error(
+                "Error publishing batch",
+                extra={
+                    "error": str(wrapped_error),
+                    "category": wrapped_error.category.value
+                },
+                exc_info=True
+            )
+            # Add messages back to the batch if the error is retryable
+            if wrapped_error.category in {
+                ErrorCategory.RETRYABLE_TRANSIENT,
+                ErrorCategory.RETRYABLE_RESOURCE
+            }:
+                async with self.batch_lock:
+                    self.batch = messages_to_publish + self.batch 

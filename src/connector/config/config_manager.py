@@ -75,6 +75,7 @@ class MongoDBConfig:
     uri: str
     database: str
     collections: List[MongoDBCollectionConfig]
+    warehouse_id: Optional[str] = None
     options: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -282,6 +283,7 @@ class ConfigurationManager:
                 uri=config["mongodb"]["uri"],
                 database=config["mongodb"]["database"],
                 collections=collection_configs,
+                warehouse_id=config["mongodb"].get("warehouse_id"),
                 options=config["mongodb"].get("options", {})
             )
             

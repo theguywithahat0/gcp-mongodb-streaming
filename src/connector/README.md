@@ -12,6 +12,12 @@ This connector streams real-time changes from MongoDB collections to Google Clou
 - Comprehensive error handling
 - Configurable connection retry with backoff
 - Health check endpoints
+- Message batching for improved throughput
+- Circuit breaker pattern for external dependencies
+- Message deduplication to prevent duplicate processing
+- Log sampling for high-volume environments
+- Document transformation hooks for custom processing
+- Graceful shutdown handling
 
 ## Prerequisites
 
@@ -49,6 +55,67 @@ Key configuration options:
 - Pub/Sub topic configurations
 - Resume token storage settings
 - Logging configuration
+- Message batching settings
+- Circuit breaker configuration
+- Message deduplication options
+- Log sampling rules
+
+### Message Batching
+
+The connector supports batching messages to improve throughput and reduce Pub/Sub costs:
+
+```yaml
+pubsub:
+  publisher:
+    batch_settings:
+      max_messages: 100
+      max_bytes: 1048576  # 1MB
+      max_latency: 0.1    # seconds
+```
+
+### Circuit Breaker
+
+The connector uses the circuit breaker pattern to handle external service failures gracefully:
+
+```yaml
+pubsub:
+  publisher:
+    circuit_breaker:
+      failure_threshold: 5
+      reset_timeout: 60.0
+      half_open_max_calls: 3
+```
+
+### Message Deduplication
+
+To prevent duplicate message processing, the connector offers two-tier deduplication:
+
+```yaml
+mongodb:
+  collections:
+    - name: inventory
+      topic: inventory-updates
+      deduplication:
+        enabled: true
+        memory_ttl: 3600        # 1 hour
+        memory_max_size: 10000
+        persistent_enabled: true
+        persistent_ttl: 86400   # 24 hours
+        cleanup_interval: 3600  # 1 hour
+```
+
+### Log Sampling
+
+For high-volume environments, log sampling reduces logging overhead:
+
+```yaml
+monitoring:
+  logging:
+    sampling:
+      enabled: true
+      rate: 0.1
+      strategy: "random"  # random, systematic, or reservoir
+```
 
 ### Schema Versioning
 
@@ -111,6 +178,25 @@ SchemaMigrator.register_migration(
 - Logging of schema versions and migrations
 - Validation against specific schema versions
 - Automatic handling of unversioned documents
+
+### Document Transformation
+
+The connector supports configurable document transformations at different stages:
+
+```python
+# Register a transformation
+transformer.register_transform(
+    TransformStage.PRE_PUBLISH,  # Can be PRE_VALIDATION, POST_VALIDATION, PRE_PUBLISH
+    DocumentType.INVENTORY,
+    transform_function
+)
+```
+
+Built-in transformations:
+- Adding processing metadata
+- Source identification
+- Schema versioning
+- Custom field transformations
 
 ### Structured Logging
 
@@ -198,14 +284,31 @@ gcloud run deploy mongo-connector \
 
 The connector exposes the following endpoints:
 - `/health`: Basic health check
-- `/readiness`: Readiness probe
+- `/readiness`: Readiness probe with component status
 - `/metrics`: Prometheus metrics
+
+Each endpoint provides different levels of health information:
+- Health: Simple up/down status
+- Readiness: Detailed status of MongoDB, Pub/Sub, and Firestore connections
+- Metrics: Operational metrics for monitoring systems
+
+## Fault Tolerance
+
+The connector implements multiple fault tolerance mechanisms:
+
+1. **Resume Token Management**: Stores processing position in Firestore
+2. **Connection Retry**: Exponential backoff for reconnection attempts
+3. **Circuit Breaker**: Prevents cascading failures during outages
+4. **Message Deduplication**: Ensures exactly-once processing
+5. **Graceful Shutdown**: Handles termination signals properly
 
 ## Architecture
 
 The connector follows a modular architecture:
 - `core/`: Core connector logic and schema validation
 - `config/`: Configuration management
+- `logging/`: Structured logging and sampling
+- `health/`: Health check endpoints
 - `utils/`: Utility functions
 - `tests/`: Test suite
 
