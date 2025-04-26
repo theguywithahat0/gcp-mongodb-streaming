@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import os
 from datetime import datetime, UTC
 
@@ -20,14 +19,33 @@ from connector.config.config_manager import (
     HealthConfig,
     HealthEndpointsConfig,
     ReadinessConfig,
-    HeartbeatConfig
+    HeartbeatConfig,
+    ConfigurationManager,
+    LoggingConfig,
+    LogSamplingConfig
 )
 from connector.core.change_stream_listener import ChangeStreamListener
 from connector.utils.serialization import deserialize_message, SerializationFormat
+from connector.logging.logging_config import get_logger, configure_logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Load test configuration
+config = ConfigurationManager("src/connector/tests/e2e_tests/test_config.yaml").config
+
+# Configure logging using test configuration
+if config.monitoring and hasattr(config.monitoring, 'logging'):
+    sampling_config = LogSamplingConfig(
+        enabled=config.monitoring.logging.get('sampling', {}).get('enabled', False)
+    )
+    logging_config = LoggingConfig(
+        level=config.monitoring.logging.get('level', 'INFO'),
+        format=config.monitoring.logging.get('format', 'json'),
+        handlers=config.monitoring.logging.get('handlers', []),
+        sampling=sampling_config
+    )
+    configure_logging(logging_config)
+
+# Get logger
+logger = get_logger(__name__)
 
 async def wait_for_operation(received_messages, expected_operation, timeout=10):
     """Wait for a specific operation to be received."""

@@ -1,0 +1,28 @@
+mongodb:
+  uri: "mongodb://localhost:27017/?replicaSet=rs0"
+  database: "test"
+  collections:
+    - name: "test_collection"
+      topic: "test-topic"
+      watch_full_document: true
+
+pubsub:
+  project_id: "test-project"
+  status_topic: "status-topic"
+  publisher:
+    batch_settings:
+      max_messages: 100
+      max_bytes: 1048576
+      max_latency: 2.0
+
+monitoring:
+  logging:
+    level: "INFO"
+    format: "json"
+    handlers:
+      - type: "console"
+    sampling:
+      enabled: false
+  tracing:
+    service_name: "mongo-connector-test"
+    endpoint: "localhost:4317" 
