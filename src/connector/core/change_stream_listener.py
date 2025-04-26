@@ -18,6 +18,12 @@ from ..logging.logging_config import get_logger, add_context_to_logger
 from .schema_validator import SchemaValidator
 from .schema_registry import DocumentType
 from .schema_migrator import SchemaMigrator, SchemaMigrationError
+from .document_transformer import (
+    DocumentTransformer, TransformStage, TransformationError,
+    add_processing_metadata
+)
+from .message_batcher import MessageBatcher, Message
+from .message_deduplication import MessageDeduplication, DeduplicationConfig
 
 class JSONEncoder(json.JSONEncoder):
     """Custom JSON encoder that handles MongoDB ObjectId."""
@@ -71,13 +77,6 @@ class ChangeStreamListener:
             config.pubsub.status_topic
         )
 
-        # Initialize state
-        self.change_stream: Optional[ChangeStream] = None
-        self.is_running = False
-        self.last_resume_token = self._load_resume_token()
-        self.heartbeat_task: Optional[asyncio.Task] = None
-        self.last_change_time = time.time()
-
         # Initialize logger with context
         self.logger = get_logger(__name__)
         self.logger = add_context_to_logger(
@@ -90,6 +89,50 @@ class ChangeStreamListener:
                 "status_topic": config.pubsub.status_topic
             }
         )
+
+        # Initialize state
+        self.change_stream: Optional[ChangeStream] = None
+        self.is_running = False
+        self.last_resume_token = self._load_resume_token()
+        self.heartbeat_task: Optional[asyncio.Task] = None
+        self.last_change_time = time.time()
+
+        # Initialize document transformer
+        self.transformer = DocumentTransformer()
+        # Register default transformations
+        self.transformer.register_transform(
+            TransformStage.PRE_PUBLISH,
+            DocumentType.INVENTORY,
+            add_processing_metadata
+        )
+        self.transformer.register_transform(
+            TransformStage.PRE_PUBLISH,
+            DocumentType.TRANSACTION,
+            add_processing_metadata
+        )
+
+        # Initialize message batcher
+        self.message_batcher = MessageBatcher(
+            project_id=config.pubsub.project_id,
+            topic=collection_config.topic,
+            batch_settings=pubsub_v1.types.BatchSettings(
+                max_messages=config.pubsub.publisher.batch_settings.max_messages,
+                max_bytes=config.pubsub.publisher.batch_settings.max_bytes,
+                max_latency=config.pubsub.publisher.batch_settings.max_latency
+            ),
+            retry_settings=config.pubsub.publisher.retry,
+            max_batch_size=config.pubsub.publisher.batch_settings.max_messages,
+            max_latency=config.pubsub.publisher.batch_settings.max_latency
+        )
+
+        # Initialize message deduplication if enabled
+        self.deduplication = None
+        if collection_config.deduplication.enabled:
+            self.deduplication = MessageDeduplication(
+                config=collection_config.deduplication,
+                firestore_client=self.firestore_client,
+                collection_name=collection_config.name
+            )
 
     def _load_resume_token(self) -> Optional[Dict[str, Any]]:
         """Load the last resume token from Firestore.
@@ -164,15 +207,19 @@ class ChangeStreamListener:
 
                 self.logger.debug(
                     "heartbeat_published",
-                    time_since_last_change=time.time() - self.last_change_time,
-                    has_resume_token=self.last_resume_token is not None
+                    extra={
+                        "time_since_last_change": time.time() - self.last_change_time,
+                        "has_resume_token": self.last_resume_token is not None
+                    }
                 )
 
             except Exception as e:
                 self.logger.error(
                     "heartbeat_publish_failed",
-                    error=str(e),
-                    error_type=type(e).__name__,
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__
+                    },
                     exc_info=True
                 )
 
@@ -180,11 +227,7 @@ class ChangeStreamListener:
             await asyncio.sleep(self.config.health.heartbeat.interval)
 
     async def _handle_change(self, change: Dict[str, Any]) -> None:
-        """Handle a single change event.
-        
-        Args:
-            change: The change event from MongoDB.
-        """
+        """Handle a single change event."""
         try:
             # Update last change time
             self.last_change_time = time.time()
@@ -194,19 +237,37 @@ class ChangeStreamListener:
                 self._save_resume_token(token)
 
             operation_type = change["operationType"]
-            
-            # Skip validation for delete operations as they don't contain full documents
-            if operation_type != "delete":
-                # Get the full document for validation
-                document = change.get("fullDocument")
-                if not document:
-                    self.logger.warning(
-                        "document_validation_skipped",
-                        reason="no_full_document",
-                        operation_type=operation_type
+            document_key = change.get("documentKey", {}).get("_id")
+            timestamp = change.get("clusterTime", time.time())
+
+            # Check for duplicates if deduplication is enabled
+            if self.deduplication and document_key:
+                is_duplicate = self.deduplication.is_duplicate(
+                    str(document_key),
+                    operation_type,
+                    timestamp
+                )
+                if is_duplicate:
+                    self.logger.info(
+                        "Skipping duplicate message",
+                        extra={
+                            "operation_type": operation_type,
+                            "doc_id": str(document_key),
+                            "timestamp": timestamp
+                        }
                     )
                     return
+            
+            # Get document for validation (if applicable)
+            document = None
+            if operation_type == "insert":
+                document = change.get("fullDocument")
+            elif operation_type == "update":
+                document = change.get("fullDocument")  # From updateLookup option
+            # Delete operations don't have documents to validate
 
+            # Validate document if we have one
+            if document:
                 # Determine document type
                 doc_type = (
                     DocumentType.INVENTORY if self.collection_config.name == "inventory"
@@ -214,14 +275,31 @@ class ChangeStreamListener:
                 )
 
                 try:
+                    # Apply pre-validation transformations
+                    document = self.transformer.apply_transforms(
+                        document,
+                        doc_type,
+                        TransformStage.PRE_VALIDATION
+                    )
+
                     # Attempt to migrate document if needed
                     document = SchemaMigrator.migrate_document(document, doc_type)
-                except SchemaMigrationError as e:
+
+                    # Apply post-validation transformations
+                    document = self.transformer.apply_transforms(
+                        document,
+                        doc_type,
+                        TransformStage.POST_VALIDATION
+                    )
+
+                except (TransformationError, SchemaMigrationError) as e:
                     self.logger.error(
-                        "document_migration_failed",
-                        error=str(e),
-                        operation_type=operation_type,
-                        doc_id=str(document.get("_id"))
+                        "Document processing failed",
+                        extra={
+                            "error": str(e),
+                            "operation_type": operation_type,
+                            "doc_id": str(document.get("_id"))
+                        }
                     )
                     return
 
@@ -233,52 +311,77 @@ class ChangeStreamListener:
                 
                 if validation_error:
                     self.logger.error(
-                        "document_validation_failed",
-                        error=validation_error,
-                        operation_type=operation_type,
-                        doc_type=doc_type.value,
-                        doc_id=str(document.get("_id"))
+                        "Document validation failed",
+                        extra={
+                            "error": validation_error,
+                            "operation_type": operation_type,
+                            "doc_type": doc_type.value,
+                            "doc_id": str(document.get("_id"))
+                        }
                     )
                     return  # Skip publishing invalid documents
+
+                try:
+                    # Apply pre-publish transformations
+                    document = self.transformer.apply_transforms(
+                        document,
+                        doc_type,
+                        TransformStage.PRE_PUBLISH
+                    )
+                except TransformationError as e:
+                    self.logger.error(
+                        "Pre-publish transform failed",
+                        extra={
+                            "error": str(e),
+                            "operation_type": operation_type,
+                            "doc_id": str(document.get("_id"))
+                        }
+                    )
+                    return
 
             # Prepare the message
             message = {
                 "collection": self.collection_config.name,
                 "operation": operation_type,
-                "timestamp": time.time(),
+                "timestamp": timestamp,
                 "data": change
             }
 
-            # Publish to Pub/Sub using custom JSON encoder
-            future = self.publisher.publish(
-                self.topic_path,
-                json.dumps(message, cls=JSONEncoder).encode("utf-8"),
-                collection=self.collection_config.name,
-                operation=operation_type,
-                schema_version=document.get("_schema_version", "v1") if operation_type != "delete" else "v1"
-            )
-            
-            # Wait for the publish to complete
-            await asyncio.get_event_loop().run_in_executor(
-                None, future.result
+            # Add message to batch
+            await self.message_batcher.add_message(
+                Message(
+                    data=message,
+                    attributes={
+                        "collection": self.collection_config.name,
+                        "operation": operation_type,
+                        "schema_version": (
+                            document.get("_schema_version", "v1")
+                            if document
+                            else "v1"
+                        )
+                    }
+                )
             )
 
             self.logger.info(
-                "change_event_published",
-                operation_type=operation_type,
-                doc_id=str(change.get("documentKey", {}).get("_id")),
-                processing_time=time.time() - self.last_change_time,
-                schema_version=document.get("_schema_version", "v1") if operation_type != "delete" else "v1"
+                "Change event processed",
+                extra={
+                    "operation_type": operation_type,
+                    "doc_id": str(document_key),
+                    "processing_time": time.time() - self.last_change_time,
+                    "schema_version": document.get("_schema_version", "v1") if document else "v1"
+                }
             )
 
         except Exception as e:
             self.logger.error(
-                "change_event_processing_failed",
-                error=str(e),
-                error_type=type(e).__name__,
-                operation_type=change.get("operationType"),
-                doc_id=str(change.get("documentKey", {}).get("_id")),
-                exc_info=True
+                "Change event processing failed",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "operation_type": change.get("operationType"),
+                    "doc_id": str(change.get("documentKey", {}).get("_id"))
+                }
             )
             raise
 
@@ -289,18 +392,31 @@ class ChangeStreamListener:
                 # Start change stream
                 self.change_stream = self.collection.watch(
                     pipeline=self.collection_config.watch_filter or [],
-                    resume_after=self.last_resume_token
+                    resume_after=self.last_resume_token,
+                    full_document='updateLookup'  # Always get the full document for updates
                 )
 
                 self.logger.info(
                     "change_stream_started",
-                    resume_token=str(self.last_resume_token) if self.last_resume_token else None,
-                    watch_filter=self.collection_config.watch_filter
+                    extra={
+                        "resume_token": str(self.last_resume_token) if self.last_resume_token else None,
+                        "watch_filter": self.collection_config.watch_filter
+                    }
                 )
 
                 # Process changes
                 async for change in self._aiter_change_stream():
-                    await self._handle_change(change)
+                    if change:
+                        self.logger.info(
+                            "change_detected",
+                            extra={
+                                "operation_type": change.get("operationType"),
+                                "doc_id": str(change.get("documentKey", {}).get("_id"))
+                            }
+                        )
+                        await self._handle_change(change)
+                    else:
+                        self.logger.debug("No change detected in stream")
 
             except PyMongoError as e:
                 if not self.is_running:
@@ -308,9 +424,11 @@ class ChangeStreamListener:
 
                 self.logger.error(
                     "change_stream_error",
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    exc_info=True
+                    extra={
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                        "exc_info": True
+                    }
                 )
                 
                 # Wait before retrying
@@ -361,6 +479,9 @@ class ChangeStreamListener:
         # Start heartbeat task if enabled
         if self.config.health.heartbeat.enabled:
             self.heartbeat_task = asyncio.create_task(self._publish_heartbeat())
+
+        # Start message batcher
+        await self.message_batcher.start()
         
         await self._watch_collection()
 
@@ -378,6 +499,15 @@ class ChangeStreamListener:
                 await self.heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop message batcher
+        await self.message_batcher.stop()
+
+        # Clean up deduplication cache if enabled
+        if self.deduplication:
+            self.deduplication._cleanup_memory()
+            if self.deduplication.config.persistent_enabled:
+                self.deduplication._cleanup_persistent()
             
         self.logger.info("change_stream_listener_stopped")
 
