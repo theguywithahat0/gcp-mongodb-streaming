@@ -1,6 +1,7 @@
 mongodb:
   uri: "mongodb://localhost:27017/?replicaSet=rs0"
   database: "test"
+  warehouse_id: "TEST_WH"
   collections:
     - name: "test_collection"
       topic: "test-topic"
@@ -14,6 +15,20 @@ pubsub:
       max_messages: 100
       max_bytes: 1048576
       max_latency: 2.0
+
+firestore:
+  collection: "message_dedup"
+  ttl: 86400
+
+health:
+  endpoints:
+    health: "/health"
+    readiness: "/readiness"
+    metrics: "/metrics"
+  readiness:
+    timeout: 5
+  heartbeat:
+    enabled: false
 
 monitoring:
   logging:

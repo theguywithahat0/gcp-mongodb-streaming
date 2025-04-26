@@ -14,7 +14,7 @@ from pymongo.collection import Collection
 from pymongo.errors import PyMongoError
 
 from ..config.config_manager import (ConnectorConfig, MongoDBCollectionConfig,
-                                   RetryConfig)
+                                   RetryConfig, BackpressureConfig)
 from ..logging.logging_config import get_logger, add_context_to_logger
 from .schema_validator import SchemaValidator
 from .schema_registry import DocumentType
@@ -39,7 +39,8 @@ class ChangeStreamListener:
         mongo_client: Optional[MongoClient] = None,
         publisher: Optional[pubsub_v1.PublisherClient] = None,
         firestore_client: Optional[firestore.Client] = None,
-        serialization_format: SerializationFormat = SerializationFormat.MSGPACK
+        serialization_format: SerializationFormat = SerializationFormat.MSGPACK,
+        backpressure_config: Optional[BackpressureConfig] = None
     ):
         """Initialize the change stream listener.
         
@@ -50,11 +51,13 @@ class ChangeStreamListener:
             publisher: Optional Pub/Sub publisher instance.
             firestore_client: Optional Firestore client instance.
             serialization_format: Format to use for message serialization
+            backpressure_config: Optional backpressure configuration
         """
         self.config = config
         self.collection_config = collection_config
         self.retry_config = config.retry
         self.serialization_format = serialization_format
+        self.backpressure_config = backpressure_config or config.pubsub.publisher.backpressure
 
         # Initialize clients
         self.mongo_client = mongo_client or MongoClient(
@@ -159,7 +162,8 @@ class ChangeStreamListener:
             retry_settings=config.pubsub.publisher.retry,
             max_batch_size=config.pubsub.publisher.batch_settings.max_messages,
             max_latency=config.pubsub.publisher.batch_settings.max_latency,
-            serialization_format=serialization_format
+            serialization_format=serialization_format,
+            backpressure_config=self.backpressure_config
         )
 
         # Initialize message deduplication if enabled

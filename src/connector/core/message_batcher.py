@@ -13,10 +13,11 @@ from google.api_core import retry
 from google.cloud import pubsub_v1
 from google.cloud.pubsub_v1.types import BatchSettings
 
-from ..config.config_manager import PublisherConfig
+from ..config.config_manager import PublisherConfig, BackpressureConfig
 from ..logging.logging_config import get_logger
 from ..utils.serialization import serialize_message, SerializationFormat
 from ..utils.error_utils import with_retries, wrap_error, ErrorCategory, ConnectorError
+from .backpressure_handler import BackpressureHandler
 
 logger = get_logger(__name__)
 
@@ -28,7 +29,7 @@ class Message:
     serialization_format: SerializationFormat = SerializationFormat.MSGPACK
 
 class MessageBatcher:
-    """Batches messages for efficient Pub/Sub publishing."""
+    """Batches messages for efficient Pub/Sub publishing with backpressure handling."""
 
     def __init__(
         self,
@@ -36,6 +37,7 @@ class MessageBatcher:
         topic: str,
         batch_settings: BatchSettings,
         retry_settings: Dict,
+        backpressure_config: BackpressureConfig,
         max_batch_size: int = 100,
         max_latency: float = 0.05,
         serialization_format: SerializationFormat = SerializationFormat.MSGPACK
@@ -47,6 +49,7 @@ class MessageBatcher:
             topic: Pub/Sub topic name
             batch_settings: Pub/Sub batch settings
             retry_settings: Pub/Sub retry settings
+            backpressure_config: Backpressure handling configuration
             max_batch_size: Maximum number of messages per batch
             max_latency: Maximum latency before publishing a batch
             serialization_format: Format to use for message serialization
@@ -75,6 +78,9 @@ class MessageBatcher:
         self.messages: List[Message] = []
         self.last_publish_time = time.time()
         self.publish_task: Optional[asyncio.Task] = None
+        
+        # Initialize backpressure handler
+        self.backpressure = BackpressureHandler(backpressure_config)
 
     async def add_message(self, message: Message) -> None:
         """Add a message to the batch.
@@ -82,6 +88,20 @@ class MessageBatcher:
         Args:
             message: The message to add
         """
+        # Check backpressure before accepting message
+        if not await self.backpressure.acquire():
+            self.logger.warning(
+                "Message rejected due to backpressure",
+                extra={
+                    "topic": self.topic,
+                    "metrics": await self.backpressure.get_metrics()
+                }
+            )
+            # Wait before retrying
+            await asyncio.sleep(0.1)
+            await self.add_message(message)  # Retry
+            return
+
         self.messages.append(message)
 
         # Start delayed publish task if not already running
@@ -109,6 +129,7 @@ class MessageBatcher:
                     "error_type": type(e).__name__
                 }
             )
+            await self.backpressure.record_operation(success=False)
 
     async def _publish_batch(self) -> None:
         """Publish current batch of messages."""
@@ -135,11 +156,13 @@ class MessageBatcher:
                 publish_futures.append(future)
 
             # Wait for all messages to be published
+            success = True
             for future in publish_futures:
                 try:
                     # Run the future in an executor to avoid blocking
                     await asyncio.get_event_loop().run_in_executor(None, future.result)
                 except Exception as e:
+                    success = False
                     self.logger.error(
                         "Failed to publish message",
                         extra={
@@ -147,6 +170,9 @@ class MessageBatcher:
                             "error_type": type(e).__name__
                         }
                     )
+
+            # Record operation result for backpressure adjustment
+            await self.backpressure.record_operation(success=success)
 
             # Update state
             self.last_publish_time = time.time()
@@ -156,7 +182,8 @@ class MessageBatcher:
                 "Published message batch",
                 extra={
                     "batch_size": len(publish_futures),
-                    "topic": self.topic
+                    "topic": self.topic,
+                    "backpressure_metrics": await self.backpressure.get_metrics()
                 }
             )
 
@@ -169,6 +196,7 @@ class MessageBatcher:
                     "batch_size": len(self.messages)
                 }
             )
+            await self.backpressure.record_operation(success=False)
             raise
 
     async def flush(self) -> None:

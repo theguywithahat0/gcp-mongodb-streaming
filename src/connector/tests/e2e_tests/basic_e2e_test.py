@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 from datetime import datetime, UTC
 
@@ -20,32 +21,15 @@ from connector.config.config_manager import (
     HealthEndpointsConfig,
     ReadinessConfig,
     HeartbeatConfig,
-    ConfigurationManager,
-    LoggingConfig,
-    LogSamplingConfig
+    BackpressureConfig,
+    CircuitBreakerSettings
 )
 from connector.core.change_stream_listener import ChangeStreamListener
 from connector.utils.serialization import deserialize_message, SerializationFormat
-from connector.logging.logging_config import get_logger, configure_logging
 
-# Load test configuration
-config = ConfigurationManager("src/connector/tests/e2e_tests/test_config.yaml").config
-
-# Configure logging using test configuration
-if config.monitoring and hasattr(config.monitoring, 'logging'):
-    sampling_config = LogSamplingConfig(
-        enabled=config.monitoring.logging.get('sampling', {}).get('enabled', False)
-    )
-    logging_config = LoggingConfig(
-        level=config.monitoring.logging.get('level', 'INFO'),
-        format=config.monitoring.logging.get('format', 'json'),
-        handlers=config.monitoring.logging.get('handlers', []),
-        sampling=sampling_config
-    )
-    configure_logging(logging_config)
-
-# Get logger
-logger = get_logger(__name__)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 async def wait_for_operation(received_messages, expected_operation, timeout=10):
     """Wait for a specific operation to be received."""
@@ -158,6 +142,21 @@ async def run_test():
                         max_messages=100,
                         max_bytes=1024 * 1024,
                         max_latency=2.0
+                    ),
+                    backpressure=BackpressureConfig(
+                        tokens_per_second=1000.0,
+                        bucket_size=2000,
+                        min_tokens_per_second=100.0,
+                        max_tokens_per_second=5000.0,
+                        error_decrease_factor=0.8,
+                        success_increase_factor=1.1,
+                        rate_update_interval=5.0,
+                        metrics_window_size=100
+                    ),
+                    circuit_breaker=CircuitBreakerSettings(
+                        failure_threshold=5,
+                        reset_timeout=60.0,
+                        half_open_max_calls=3
                     )
                 )
             ),
@@ -184,7 +183,8 @@ async def run_test():
                 mongo_client=mongo_client,
                 publisher=publisher,
                 firestore_client=firestore_client,
-                serialization_format=SerializationFormat.MSGPACK
+                serialization_format=SerializationFormat.MSGPACK,
+                backpressure_config=config.pubsub.publisher.backpressure
             )
 
             # Start the listener
@@ -248,12 +248,42 @@ async def run_test():
 
         finally:
             # Cleanup
-            await listener.stop()
-            future.cancel()
-            collection.delete_many({})
+            try:
+                # Stop the change stream listener
+                if listener:
+                    await listener.stop()
+                    
+                # Cancel the listener task
+                if 'listener_task' in locals():
+                    listener_task.cancel()
+                    try:
+                        await listener_task
+                    except asyncio.CancelledError:
+                        pass
+
+                # Cancel the subscriber
+                if 'future' in locals():
+                    future.cancel()
+                    
+                # Clean up the collection
+                collection.delete_many({})
+
+                # Clean up Pub/Sub resources
+                try:
+                    subscriber.delete_subscription(request={"subscription": subscription_path})
+                    publisher.delete_topic(request={"topic": topic_path})
+                    publisher.delete_topic(request={"topic": status_topic_path})
+                except Exception as e:
+                    logger.warning(f"Error during Pub/Sub cleanup: {e}")
+
+                # Close clients
+                mongo_client.close()
+
+            except Exception as e:
+                logger.warning(f"Error during cleanup: {e}")
 
     except Exception as e:
-        logger.error(f"Test failed: {str(e)}")
+        logger.error(f"Test failed: {e}")
         raise
 
 if __name__ == "__main__":
