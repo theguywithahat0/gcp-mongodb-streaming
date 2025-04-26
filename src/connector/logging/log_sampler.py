@@ -6,6 +6,7 @@ from typing import Dict, Optional, Set
 import logging
 from dataclasses import dataclass
 from enum import Enum
+import logging
 
 class SamplingStrategy(Enum):
     """Available sampling strategies."""
@@ -56,9 +57,6 @@ class LogSampler:
         self._last_sampled: Dict[str, float] = {}
         # Cache for deterministic sampling
         self._sampled_messages: Set[str] = set()
-        
-        # Initialize logger
-        self.logger = logging.getLogger(__name__)
 
     def should_sample(
         self,
@@ -199,61 +197,4 @@ class LogSampler:
             if current_time - last_time > ttl
         ]
         for key in expired:
-            del self._last_sampled[key]
-
-class SampledLogger:
-    """Logger wrapper that applies sampling before logging messages."""
-
-    def __init__(
-        self,
-        logger: logging.Logger,
-        sampler: LogSampler
-    ):
-        """Initialize the sampled logger.
-        
-        Args:
-            logger: The logger to wrap
-            sampler: The log sampler to use
-        """
-        self._logger = logger
-        self._sampler = sampler
-
-    def log(
-        self,
-        level: int,
-        msg: str,
-        msg_type: Optional[str] = None,
-        *args,
-        **kwargs
-    ) -> None:
-        """Log a message if it passes sampling.
-        
-        Args:
-            level: Log level
-            msg: Log message
-            msg_type: Optional message type
-            *args: Additional positional arguments
-            **kwargs: Additional keyword arguments
-        """
-        if self._sampler.should_sample(level, msg, msg_type):
-            self._logger.log(level, msg, *args, **kwargs)
-
-    def debug(self, msg: str, msg_type: Optional[str] = None, *args, **kwargs) -> None:
-        """Log a debug message if it passes sampling."""
-        self.log(logging.DEBUG, msg, msg_type, *args, **kwargs)
-
-    def info(self, msg: str, msg_type: Optional[str] = None, *args, **kwargs) -> None:
-        """Log an info message if it passes sampling."""
-        self.log(logging.INFO, msg, msg_type, *args, **kwargs)
-
-    def warning(self, msg: str, msg_type: Optional[str] = None, *args, **kwargs) -> None:
-        """Log a warning message if it passes sampling."""
-        self.log(logging.WARNING, msg, msg_type, *args, **kwargs)
-
-    def error(self, msg: str, msg_type: Optional[str] = None, *args, **kwargs) -> None:
-        """Log an error message if it passes sampling."""
-        self.log(logging.ERROR, msg, msg_type, *args, **kwargs)
-
-    def critical(self, msg: str, msg_type: Optional[str] = None, *args, **kwargs) -> None:
-        """Log a critical message if it passes sampling."""
-        self.log(logging.CRITICAL, msg, msg_type, *args, **kwargs) 
+            del self._last_sampled[key] 

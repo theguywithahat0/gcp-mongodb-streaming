@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+from ..logging.logging_config import get_logger
 
 @dataclass
 class DeduplicationConfig:
@@ -54,7 +55,7 @@ class MessageDeduplication:
         self._last_cleanup = time.time()
         
         # Logger
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
 
     def is_duplicate(
         self,

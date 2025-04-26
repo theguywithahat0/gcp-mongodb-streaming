@@ -1,9 +1,12 @@
 """Document transformer for applying configurable transformations to documents."""
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from enum import Enum
-import logging
+from ..logging.logging_config import get_logger
 from datetime import datetime
+import hashlib
+import json
+from functools import lru_cache
 
 from .schema_registry import DocumentType
 
@@ -23,16 +26,73 @@ class TransformationError(Exception):
 class DocumentTransformer:
     """Manages and applies document transformations."""
 
-    def __init__(self):
-        """Initialize the document transformer."""
+    def __init__(self, cache_size: int = 1000):
+        """Initialize the document transformer.
+        
+        Args:
+            cache_size: Maximum number of cached transformation results to keep.
+        """
         # Dictionary to store transformation functions by stage and document type
         self._transforms: Dict[TransformStage, Dict[DocumentType, List[TransformFunc]]] = {
             stage: {doc_type: [] for doc_type in DocumentType}
             for stage in TransformStage
         }
 
+        # Cache configuration
+        self._cache_size = cache_size
+        
         # Initialize logger
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
+
+    def _generate_cache_key(
+        self,
+        document: Dict[str, Any],
+        doc_type: DocumentType,
+        stage: TransformStage
+    ) -> str:
+        """Generate a cache key for a document transformation.
+        
+        Args:
+            document: The document to transform
+            doc_type: The type of document
+            stage: The transformation stage
+            
+        Returns:
+            A unique cache key string
+        """
+        # Create a deterministic string representation of the document
+        doc_str = json.dumps(document, sort_keys=True)
+        
+        # Include document type and stage in the key
+        key_parts = [
+            doc_str,
+            doc_type.value,
+            stage.value
+        ]
+        
+        # Generate a hash of the combined string
+        return hashlib.sha256('|'.join(key_parts).encode()).hexdigest()
+
+    @lru_cache(maxsize=1000)
+    def _cached_transform(
+        self,
+        cache_key: str,
+        transform_func: TransformFunc,
+        document: str
+    ) -> str:
+        """Apply a single transformation with caching.
+        
+        Args:
+            cache_key: Unique key for caching
+            transform_func: The transformation function to apply
+            document: JSON string representation of the document
+            
+        Returns:
+            JSON string of transformed document
+        """
+        doc_dict = json.loads(document)
+        transformed = transform_func(doc_dict)
+        return json.dumps(transformed, sort_keys=True)
 
     def register_transform(
         self,
@@ -94,9 +154,21 @@ class DocumentTransformer:
         transformed = document.copy()
         transforms = self._transforms[stage][doc_type]
 
+        # Generate base cache key for this document
+        base_cache_key = self._generate_cache_key(document, doc_type, stage)
+        
         for transform in transforms:
             try:
-                transformed = transform(transformed)
+                # Create unique cache key for this specific transformation
+                transform_key = f"{base_cache_key}_{transform.__name__}"
+                
+                # Convert document to JSON string for caching
+                doc_str = json.dumps(transformed, sort_keys=True)
+                
+                # Apply cached transformation
+                result_str = self._cached_transform(transform_key, transform, doc_str)
+                transformed = json.loads(result_str)
+                
                 if not isinstance(transformed, dict):
                     raise TransformationError(
                         f"Transform {transform.__name__} returned {type(transformed)}, "
@@ -117,32 +189,36 @@ class DocumentTransformer:
         stage: Optional[TransformStage] = None,
         doc_type: Optional[DocumentType] = None
     ) -> None:
-        """Clear registered transformations.
+        """Clear registered transformations and their cached results.
         
         Args:
             stage: Optional stage to clear. If None, clears all stages.
             doc_type: Optional document type to clear. If None, clears all types.
         """
         if stage is None and doc_type is None:
-            # Clear all transforms
+            # Clear all transforms and cache
             self._transforms = {
                 stage: {doc_type: [] for doc_type in DocumentType}
                 for stage in TransformStage
             }
+            self._cached_transform.cache_clear()
         elif stage is None:
             # Clear all transforms for a specific document type
             for stage_transforms in self._transforms.values():
                 stage_transforms[doc_type] = []
+            self._cached_transform.cache_clear()
         elif doc_type is None:
             # Clear all transforms for a specific stage
             for doc_type_transforms in self._transforms[stage].values():
                 doc_type_transforms.clear()
+            self._cached_transform.cache_clear()
         else:
             # Clear transforms for specific stage and document type
             self._transforms[stage][doc_type] = []
+            self._cached_transform.cache_clear()
 
         self.logger.info(
-            "Cleared transformations"
+            "Cleared transformations and cache"
             f"{f' for {doc_type.value}' if doc_type else ''}"
             f"{f' at {stage.value} stage' if stage else ''}"
         )

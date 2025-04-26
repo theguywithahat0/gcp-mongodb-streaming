@@ -5,7 +5,7 @@ import time
 from enum import Enum
 from typing import Any, Callable, Optional, TypeVar
 from functools import wraps
-import logging
+from ..logging.logging_config import get_logger
 
 T = TypeVar('T')
 
@@ -63,7 +63,7 @@ class CircuitBreaker:
         self._state_lock = asyncio.Lock()
         
         # Logging
-        self.logger = logging.getLogger(__name__)
+        self.logger = get_logger(__name__)
 
     @property
     def state(self) -> CircuitBreakerState:

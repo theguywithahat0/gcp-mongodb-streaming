@@ -23,6 +23,7 @@ from connector.config.config_manager import (
     HeartbeatConfig
 )
 from connector.core.change_stream_listener import ChangeStreamListener
+from connector.utils.serialization import deserialize_message, SerializationFormat
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -53,11 +54,20 @@ async def run_test():
         # Initialize Pub/Sub (using emulator)
         publisher = pubsub_v1.PublisherClient()
         topic_path = publisher.topic_path('test-project', 'test-topic')
+        status_topic_path = publisher.topic_path('test-project', 'status-topic')
         
+        # Create topics
         try:
             publisher.create_topic(request={"name": topic_path})
-        except Exception:
-            logger.info(f"Topic already exists: {topic_path}")
+            logger.info(f"Created topic: {topic_path}")
+        except Exception as e:
+            logger.info(f"Topic already exists or error: {e}")
+
+        try:
+            publisher.create_topic(request={"name": status_topic_path})
+            logger.info(f"Created status topic: {status_topic_path}")
+        except Exception as e:
+            logger.info(f"Status topic already exists or error: {e}")
 
         # Initialize subscriber
         subscriber = pubsub_v1.SubscriberClient()
@@ -67,12 +77,46 @@ async def run_test():
             subscriber.create_subscription(
                 request={"name": subscription_path, "topic": topic_path}
             )
-        except Exception:
-            logger.info(f"Subscription already exists: {subscription_path}")
+            logger.info(f"Created subscription: {subscription_path}")
+        except Exception as e:
+            logger.info(f"Subscription already exists or error: {e}")
 
         # Initialize Firestore (using emulator)
         os.environ['FIRESTORE_EMULATOR_HOST'] = 'localhost:8086'
         firestore_client = firestore.Client(project='test-project')
+
+        # Store received messages and test start time
+        received_messages = []
+        test_start_time = datetime.now(UTC)
+
+        def message_callback(message):
+            # Get serialization format from attributes
+            format_str = message.attributes.get('serialization_format', 'msgpack')
+            format = SerializationFormat(format_str)
+            
+            # Deserialize message data
+            data = deserialize_message(message.data, format=format)
+            
+            # Only process messages from after our test started
+            if 'data' in data and 'wallTime' in data['data']:
+                try:
+                    wall_time = datetime.fromisoformat(data['data']['wallTime'])
+                    # Ensure wall_time is timezone-aware
+                    if wall_time.tzinfo is None:
+                        wall_time = wall_time.replace(tzinfo=UTC)
+                    if wall_time >= test_start_time:
+                        logger.info(f"Received message: {data}")
+                        received_messages.append(data)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Error processing message timestamp: {e}")
+            message.ack()
+
+        # Start subscriber
+        future = subscriber.subscribe(subscription_path, message_callback)
+        logger.info("Started Pub/Sub subscriber")
+
+        # Wait a moment for the subscriber to be ready
+        await asyncio.sleep(2)
 
         # Basic connector config
         config = ConnectorConfig(
@@ -90,6 +134,7 @@ async def run_test():
             ),
             pubsub=PubSubConfig(
                 project_id='test-project',
+                status_topic='status-topic',
                 publisher=PublisherConfig(
                     batch_settings=BatchSettings(
                         max_messages=100,
@@ -113,48 +158,22 @@ async def run_test():
             )
         )
 
-        # Initialize and start change stream listener
-        listener = ChangeStreamListener(
-            config=config,
-            collection_config=config.mongodb.collections[0],
-            mongo_client=mongo_client,
-            publisher=publisher,
-            firestore_client=firestore_client
-        )
-
-        # Start the listener
-        listener_task = asyncio.create_task(listener.start())
-        await asyncio.sleep(2)  # Wait for listener to be ready
-        logger.info("Change stream listener started")
-
-        # Store received messages and test start time
-        received_messages = []
-        test_start_time = datetime.now(UTC)
-
-        def message_callback(message):
-            data = json.loads(message.data.decode('utf-8'))
-            # Only process messages from after our test started
-            if 'data' in data and 'wallTime' in data['data']:
-                try:
-                    wall_time = datetime.fromisoformat(data['data']['wallTime'])
-                    # Ensure wall_time is timezone-aware
-                    if wall_time.tzinfo is None:
-                        wall_time = wall_time.replace(tzinfo=UTC)
-                    if wall_time >= test_start_time:
-                        logger.info(f"Received message: {data}")
-                        received_messages.append(data)
-                except (ValueError, TypeError) as e:
-                    logger.warning(f"Error processing message timestamp: {e}")
-            message.ack()
-
-        # Start subscriber
-        future = subscriber.subscribe(subscription_path, message_callback)
-        logger.info("Started Pub/Sub subscriber")
-
-        # Wait a moment for the subscriber to be ready
-        await asyncio.sleep(2)
-
         try:
+            # Initialize and start change stream listener
+            listener = ChangeStreamListener(
+                config=config,
+                collection_config=config.mongodb.collections[0],
+                mongo_client=mongo_client,
+                publisher=publisher,
+                firestore_client=firestore_client,
+                serialization_format=SerializationFormat.MSGPACK
+            )
+
+            # Start the listener
+            listener_task = asyncio.create_task(listener.start())
+            await asyncio.sleep(2)  # Wait for listener to be ready
+            logger.info("Change stream listener started")
+
             # Test 1: Insert document
             test_doc = {
                 "_id": "test1",

@@ -5,6 +5,7 @@ import json
 import time
 from typing import Any, Dict, Optional
 from bson import ObjectId
+from datetime import datetime, UTC
 
 from google.cloud import firestore, pubsub_v1
 from pymongo import MongoClient
@@ -26,6 +27,7 @@ from .message_batcher import MessageBatcher, Message
 from .message_deduplication import MessageDeduplication, DeduplicationConfig
 from ..utils.json_utils import MongoDBJSONEncoder
 from ..utils.error_utils import with_retries, wrap_error, ErrorCategory, ConnectorError
+from ..utils.serialization import SerializationFormat
 
 class ChangeStreamListener:
     """Listens to MongoDB change streams and publishes events to Pub/Sub."""
@@ -36,7 +38,8 @@ class ChangeStreamListener:
         collection_config: MongoDBCollectionConfig,
         mongo_client: Optional[MongoClient] = None,
         publisher: Optional[pubsub_v1.PublisherClient] = None,
-        firestore_client: Optional[firestore.Client] = None
+        firestore_client: Optional[firestore.Client] = None,
+        serialization_format: SerializationFormat = SerializationFormat.MSGPACK
     ):
         """Initialize the change stream listener.
         
@@ -46,10 +49,12 @@ class ChangeStreamListener:
             mongo_client: Optional MongoDB client instance.
             publisher: Optional Pub/Sub publisher instance.
             firestore_client: Optional Firestore client instance.
+            serialization_format: Format to use for message serialization
         """
         self.config = config
         self.collection_config = collection_config
         self.retry_config = config.retry
+        self.serialization_format = serialization_format
 
         # Initialize clients
         self.mongo_client = mongo_client or MongoClient(
@@ -142,7 +147,7 @@ class ChangeStreamListener:
             add_processing_metadata
         )
 
-        # Initialize message batcher
+        # Initialize message batcher with serialization format
         self.message_batcher = MessageBatcher(
             project_id=config.pubsub.project_id,
             topic=collection_config.topic,
@@ -153,7 +158,8 @@ class ChangeStreamListener:
             ),
             retry_settings=config.pubsub.publisher.retry,
             max_batch_size=config.pubsub.publisher.batch_settings.max_messages,
-            max_latency=config.pubsub.publisher.batch_settings.max_latency
+            max_latency=config.pubsub.publisher.batch_settings.max_latency,
+            serialization_format=serialization_format
         )
 
         # Initialize message deduplication if enabled
@@ -181,7 +187,7 @@ class ChangeStreamListener:
                 "component": "change_stream_listener",
                 "operation": "load_resume_token"
             })
-            logger.error(
+            self.logger.error(
                 "Failed to load resume token",
                 extra={
                     "error": str(wrapped_error),
@@ -208,7 +214,7 @@ class ChangeStreamListener:
                 "component": "change_stream_listener",
                 "operation": "save_resume_token"
             })
-            logger.error(
+            self.logger.error(
                 "Failed to save resume token",
                 extra={
                     "error": str(wrapped_error),
@@ -315,7 +321,7 @@ class ChangeStreamListener:
                         "operation": "check_duplicate",
                         "doc_id": str(document_key)
                     })
-                    logger.error(
+                    self.logger.error(
                         "Failed to check for duplicate message",
                         extra={
                             "error": str(wrapped_error),
@@ -365,7 +371,7 @@ class ChangeStreamListener:
                         "doc_id": str(document.get("_id")),
                         "operation_type": operation_type
                     })
-                    logger.error(
+                    self.logger.error(
                         "Document processing failed",
                         extra={
                             "error": str(wrapped_error),
@@ -393,7 +399,7 @@ class ChangeStreamListener:
                             "operation_type": operation_type
                         }
                     )
-                    logger.error(
+                    self.logger.error(
                         "Document validation failed",
                         extra={
                             "error": str(wrapped_error),
@@ -416,7 +422,7 @@ class ChangeStreamListener:
                         "doc_id": str(document.get("_id")),
                         "operation_type": operation_type
                     })
-                    logger.error(
+                    self.logger.error(
                         "Pre-publish transform failed",
                         extra={
                             "error": str(wrapped_error),
@@ -430,10 +436,13 @@ class ChangeStreamListener:
                 "collection": self.collection_config.name,
                 "operation": operation_type,
                 "timestamp": timestamp,
-                "data": change
+                "data": {
+                    **change,
+                    "wallTime": datetime.fromtimestamp(timestamp.time, UTC).isoformat()
+                }
             }
 
-            # Add message to batch
+            # Add message to batch with serialization format
             await self.message_batcher.add_message(
                 Message(
                     data=message,
@@ -445,7 +454,8 @@ class ChangeStreamListener:
                             if document
                             else "v1"
                         )
-                    }
+                    },
+                    serialization_format=self.serialization_format
                 )
             )
 
@@ -466,7 +476,7 @@ class ChangeStreamListener:
                 "doc_id": str(change.get("documentKey", {}).get("_id")),
                 "operation_type": change.get("operationType")
             })
-            logger.error(
+            self.logger.error(
                 "Change event processing failed",
                 extra={
                     "error": str(wrapped_error),
@@ -516,7 +526,7 @@ class ChangeStreamListener:
                     "component": "change_stream_listener",
                     "operation": "watch_collection"
                 })
-                logger.error(
+                self.logger.error(
                     "change_stream_error",
                     extra={
                         "error": str(wrapped_error),
@@ -570,20 +580,17 @@ class ChangeStreamListener:
             retries += 1
 
     async def start(self) -> None:
-        """Start watching the collection."""
+        """Start listening to the change stream."""
         if self.is_running:
             return
 
         self.is_running = True
-        self.logger.info("change_stream_listener_starting")
+        self.logger.info("Starting change stream listener")
 
-        # Start heartbeat task if enabled
-        if self.config.health.heartbeat.enabled:
-            self.heartbeat_task = asyncio.create_task(self._publish_heartbeat())
+        # Start heartbeat task
+        self.heartbeat_task = asyncio.create_task(self._publish_heartbeat())
 
-        # Start message batcher
-        await self.message_batcher.start()
-        
+        # Start watching collection
         await self._watch_collection()
 
     async def stop(self) -> None:
@@ -600,9 +607,6 @@ class ChangeStreamListener:
                 await self.heartbeat_task
             except asyncio.CancelledError:
                 pass
-
-        # Stop message batcher
-        await self.message_batcher.stop()
 
         # Clean up deduplication cache if enabled
         if self.deduplication:

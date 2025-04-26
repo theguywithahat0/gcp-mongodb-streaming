@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from bson import Timestamp
+import time
 
 from google.api_core import retry
 from google.cloud import pubsub_v1
@@ -14,7 +15,7 @@ from google.cloud.pubsub_v1.types import BatchSettings
 
 from ..config.config_manager import PublisherConfig
 from ..logging.logging_config import get_logger
-from ..utils.json_utils import MongoDBJSONEncoder
+from ..utils.serialization import serialize_message, SerializationFormat
 from ..utils.error_utils import with_retries, wrap_error, ErrorCategory, ConnectorError
 
 logger = get_logger(__name__)
@@ -24,234 +25,160 @@ class Message:
     """A message to be published to Pub/Sub."""
     data: Dict[str, Any]
     attributes: Optional[Dict[str, str]] = None
-
+    serialization_format: SerializationFormat = SerializationFormat.MSGPACK
 
 class MessageBatcher:
-    """Batches messages for efficient publishing to Pub/Sub."""
+    """Batches messages for efficient Pub/Sub publishing."""
 
     def __init__(
         self,
         project_id: str,
         topic: str,
-        batch_settings: Optional[BatchSettings] = None,
-        retry_settings: Optional[retry.Retry] = None,
+        batch_settings: BatchSettings,
+        retry_settings: Dict,
         max_batch_size: int = 100,
-        max_latency: float = 0.1
+        max_latency: float = 0.05,
+        serialization_format: SerializationFormat = SerializationFormat.MSGPACK
     ):
         """Initialize the message batcher.
         
         Args:
             project_id: Google Cloud project ID
             topic: Pub/Sub topic name
-            batch_settings: Optional batch settings for the publisher
-            retry_settings: Optional retry settings for publishing
-            max_batch_size: Maximum number of messages in a batch
-            max_latency: Maximum time to wait before publishing a batch
+            batch_settings: Pub/Sub batch settings
+            retry_settings: Pub/Sub retry settings
+            max_batch_size: Maximum number of messages per batch
+            max_latency: Maximum latency before publishing a batch
+            serialization_format: Format to use for message serialization
         """
         self.project_id = project_id
         self.topic = topic
+        self.batch_settings = batch_settings
+        self.retry_settings = retry_settings
         self.max_batch_size = max_batch_size
         self.max_latency = max_latency
+        self.serialization_format = serialization_format
         
-        # Initialize publisher
+        # Initialize logger
+        self.logger = get_logger(__name__)
+
+        # Initialize publisher client
         self.publisher = pubsub_v1.PublisherClient(
             batch_settings=batch_settings,
             publisher_options=pubsub_v1.types.PublisherOptions(
-                retry=retry_settings or retry.Retry(deadline=30)
+                retry=retry_settings
             )
         )
-        
         self.topic_path = self.publisher.topic_path(project_id, topic)
-        
-        # Initialize batching state
-        self.batch: List[Message] = []
-        self.batch_lock = asyncio.Lock()
-        self.last_publish_time = datetime.now()
+
+        # Initialize message queue and batch state
+        self.messages: List[Message] = []
+        self.last_publish_time = time.time()
         self.publish_task: Optional[asyncio.Task] = None
 
-    async def start(self):
-        """Start the background publishing task."""
-        self.publish_task = asyncio.create_task(self._publish_loop())
-        logger.info(
-            "Started message batcher",
-            extra={
-                "project_id": self.project_id,
-                "topic": self.topic,
-                "max_batch_size": self.max_batch_size,
-                "max_latency": self.max_latency
-            }
-        )
-
-    async def stop(self):
-        """Stop the batcher and publish any remaining messages."""
-        if self.publish_task:
-            self.publish_task.cancel()
-            try:
-                await self.publish_task
-            except asyncio.CancelledError:
-                pass
-        
-        # Publish any remaining messages
-        await self._publish_batch()
-        logger.info("Stopped message batcher")
-
-    async def add_message(self, message: Message):
+    async def add_message(self, message: Message) -> None:
         """Add a message to the batch.
         
         Args:
             message: The message to add
         """
-        async with self.batch_lock:
-            self.batch.append(message)
-            
-            if len(self.batch) >= self.max_batch_size:
-                await self._publish_batch()
+        self.messages.append(message)
 
-    async def _publish_loop(self):
-        """Background task that publishes messages based on latency."""
-        while True:
-            try:
-                await asyncio.sleep(self.max_latency)
-                now = datetime.now()
-                
-                if (now - self.last_publish_time).total_seconds() >= self.max_latency:
-                    await self._publish_batch()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                wrapped_error = wrap_error(e, {
-                    "component": "message_batcher",
-                    "operation": "publish_loop"
-                })
-                logger.error(
-                    "Error in publish loop",
-                    extra={
-                        "error": str(wrapped_error),
-                        "category": wrapped_error.category.value
-                    },
-                    exc_info=True
-                )
+        # Start delayed publish task if not already running
+        if not self.publish_task or self.publish_task.done():
+            self.publish_task = asyncio.create_task(self._delayed_publish())
 
-    async def _publish_single_message(self, message: Message, context: Dict[str, Any]):
-        """Publish a single message with retries.
-        
-        Args:
-            message: The message to publish
-            context: Context information for error handling
-        
-        Returns:
-            str: The message ID
-        """
-        async def publish():
-            data = json.dumps(message.data, cls=MongoDBJSONEncoder).encode("utf-8")
-            future = self.publisher.publish(
-                self.topic_path,
-                data=data,
-                **message.attributes if message.attributes else {}
-            )
-            return await asyncio.to_thread(future.result)
-        
-        return await with_retries(
-            publish,
-            max_retries=3,
-            initial_delay=1.0,
-            max_delay=10.0,
-            context=context
-        )
+        # Publish immediately if batch is full
+        if len(self.messages) >= self.max_batch_size:
+            if self.publish_task:
+                self.publish_task.cancel()
+            await self._publish_batch()
 
-    async def _publish_batch(self):
-        """Publish the current batch of messages."""
-        async with self.batch_lock:
-            if not self.batch:
-                return
-            
-            messages_to_publish = self.batch
-            self.batch = []
-        
+    async def _delayed_publish(self) -> None:
+        """Publish batch after max latency."""
         try:
-            # Publish messages in parallel with retries
-            publish_tasks = []
-            
-            for i, message in enumerate(messages_to_publish):
-                context = {
-                    "component": "message_batcher",
-                    "operation": "publish_message",
-                    "batch_index": i,
-                    "batch_size": len(messages_to_publish),
-                    "topic": self.topic
+            await asyncio.sleep(self.max_latency)
+            await self._publish_batch()
+        except asyncio.CancelledError:
+            pass  # Task was cancelled for immediate publish
+        except Exception as e:
+            self.logger.error(
+                "Delayed publish failed",
+                extra={
+                    "error": str(e),
+                    "error_type": type(e).__name__
                 }
-                task = self._publish_single_message(message, context)
-                publish_tasks.append(task)
+            )
+
+    async def _publish_batch(self) -> None:
+        """Publish current batch of messages."""
+        if not self.messages:
+            return
+
+        try:
+            # Prepare messages for publishing
+            publish_futures = []
             
-            # Wait for all publishes to complete
-            results = await asyncio.gather(*publish_tasks, return_exceptions=True)
-            
-            # Check for errors
-            failed_messages = []
-            for i, result in enumerate(results):
-                if isinstance(result, Exception):
-                    if isinstance(result, ConnectorError):
-                        error = result
-                    else:
-                        error = wrap_error(result, {
-                            "component": "message_batcher",
-                            "operation": "publish_message",
-                            "batch_index": i,
-                            "batch_size": len(messages_to_publish),
-                            "topic": self.topic
-                        })
-                    logger.error(
+            for message in self.messages:
+                # Add serialization format to attributes
+                message.attributes['serialization_format'] = message.serialization_format.value
+                
+                # Serialize message data
+                data = serialize_message(message.data, format=message.serialization_format)
+                
+                # Publish message
+                future = self.publisher.publish(
+                    self.topic_path,
+                    data=data,
+                    **message.attributes
+                )
+                publish_futures.append(future)
+
+            # Wait for all messages to be published
+            for future in publish_futures:
+                try:
+                    # Run the future in an executor to avoid blocking
+                    await asyncio.get_event_loop().run_in_executor(None, future.result)
+                except Exception as e:
+                    self.logger.error(
                         "Failed to publish message",
                         extra={
-                            "error": str(error),
-                            "category": error.category.value,
-                            "message": messages_to_publish[i].data
+                            "error": str(e),
+                            "error_type": type(e).__name__
                         }
                     )
-                    failed_messages.append(messages_to_publish[i])
-            
-            # Add failed messages back to the batch if they're retryable
-            if failed_messages:
-                async with self.batch_lock:
-                    retryable_messages = [
-                        msg for msg, result in zip(failed_messages, results)
-                        if isinstance(result, Exception) and 
-                        (isinstance(result, ConnectorError) and result.category in {
-                            ErrorCategory.RETRYABLE_TRANSIENT,
-                            ErrorCategory.RETRYABLE_RESOURCE
-                        })
-                    ]
-                    if retryable_messages:
-                        self.batch = retryable_messages + self.batch
-            
-            self.last_publish_time = datetime.now()
-            logger.debug(
-                "Published messages",
+
+            # Update state
+            self.last_publish_time = time.time()
+            self.messages.clear()
+
+            self.logger.info(
+                "Published message batch",
                 extra={
-                    "batch_size": len(messages_to_publish),
-                    "failed": len(failed_messages),
+                    "batch_size": len(publish_futures),
                     "topic": self.topic
                 }
             )
+
         except Exception as e:
-            wrapped_error = wrap_error(e, {
-                "component": "message_batcher",
-                "operation": "publish_batch",
-                "batch_size": len(messages_to_publish),
-                "topic": self.topic
-            })
-            logger.error(
-                "Error publishing batch",
+            self.logger.error(
+                "Batch publish failed",
                 extra={
-                    "error": str(wrapped_error),
-                    "category": wrapped_error.category.value
-                },
-                exc_info=True
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "batch_size": len(self.messages)
+                }
             )
-            # Add messages back to the batch if the error is retryable
-            if wrapped_error.category in {
-                ErrorCategory.RETRYABLE_TRANSIENT,
-                ErrorCategory.RETRYABLE_RESOURCE
-            }:
-                async with self.batch_lock:
-                    self.batch = messages_to_publish + self.batch 
+            raise
+
+    async def flush(self) -> None:
+        """Publish any remaining messages."""
+        if self.publish_task:
+            self.publish_task.cancel()
+        await self._publish_batch()
+
+    async def close(self) -> None:
+        """Close the batcher and clean up resources."""
+        await self.flush()
+        if self.publisher:
+            await asyncio.get_event_loop().run_in_executor(None, self.publisher.close) 
