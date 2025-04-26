@@ -4,19 +4,13 @@ This document outlines remaining code quality improvements for the MongoDB Chang
 
 ## Identified Issues
 
-### 1. Consistency Issues
-
-| Issue | Location | Description |
-|-------|----------|-------------|
-| Logging configuration inconsistency | Tests directory | The `src/connector/tests/e2e_tests/basic_e2e_test.py` file still uses `logging.getLogger(__name__)` instead of the standardized `get_logger()` function. |
-
-### 2. Configuration Improvements
+### 1. Configuration Improvements
 
 | Issue | Location | Description |
 |-------|----------|-------------|
 | Limited configuration validation | `src/connector/config/config_manager.py` | The current validation in `_create_config_objects()` only catches missing required fields but doesn't validate field values (e.g., checking batch settings are positive, retry timeouts are reasonable, etc.) |
 
-### 3. Documentation Gaps
+### 2. Documentation Gaps
 
 | Issue | Location | Description |
 |-------|----------|-------------|
@@ -24,21 +18,7 @@ This document outlines remaining code quality improvements for the MongoDB Chang
 
 ## Recommendations
 
-### 1. Standardize Remaining Logging
-
-Update the following files to use the standardized logging approach:
-
-```python
-# In src/connector/tests/e2e_tests/basic_e2e_test.py
-# Replace:
-logger = logging.getLogger(__name__)
-
-# With:
-from ...logging.logging_config import get_logger
-logger = get_logger(__name__)
-```
-
-### 2. Enhance Configuration Validation
+### 1. Enhance Configuration Validation
 
 Enhance the configuration validation in `src/connector/config/config_manager.py`:
 
@@ -86,7 +66,7 @@ def _load_config(self) -> ConnectorConfig:
     return config
 ```
 
-### 3. Add Security Documentation
+### 2. Add Security Documentation
 
 Create a new file `SECURITY.md` in the root directory to document:
 
@@ -103,7 +83,6 @@ Create a new file `SECURITY.md` in the root directory to document:
 ## Implementation Priority
 
 1. **High Priority:**
-   - Standardize logging in test files
    - Enhance configuration validation
 
 2. **Medium Priority:**
@@ -113,6 +92,5 @@ Create a new file `SECURITY.md` in the root directory to document:
 
 After making these changes, ensure the following tests are performed:
 
-1. Verify logging works consistently across all modules
-2. Test configuration validation with invalid values
-3. Review security documentation for completeness 
+1. Test configuration validation with invalid values
+2. Review security documentation for completeness 

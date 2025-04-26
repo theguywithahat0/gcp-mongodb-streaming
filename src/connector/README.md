@@ -18,6 +18,7 @@ This connector streams real-time changes from MongoDB collections to Google Clou
 - Log sampling for high-volume environments
 - Document transformation hooks for custom processing
 - Graceful shutdown handling
+- Security transformations for sensitive data handling
 
 ## Prerequisites
 
@@ -127,7 +128,7 @@ The connector includes a robust schema versioning system that ensures data consi
 - Automatic version detection and validation
 - Easy addition of new schema versions
 
-Example schema version:
+Example schema version from `schema_registry.py`:
 ```python
 INVENTORY_SCHEMAS = {
     "v1": {
@@ -144,8 +145,15 @@ INVENTORY_SCHEMAS = {
             "product_id": {"type": "string"},
             "warehouse_id": {"type": "string"},
             "quantity": {"type": "integer", "minimum": 0},
-            "last_updated": {"type": "string", "format": "date-time"}
-        }
+            "last_updated": {"type": "string", "format": "date-time"},
+            # Optional fields
+            "category": {"type": "string"},
+            "brand": {"type": "string"},
+            "sku": {"type": "string"},
+            "threshold_min": {"type": "integer", "minimum": 0},
+            "threshold_max": {"type": "integer", "minimum": 0}
+        },
+        "additionalProperties": true
     }
 }
 ```
@@ -156,7 +164,7 @@ INVENTORY_SCHEMAS = {
 - Path finding for multi-step migrations
 - Error handling and logging during migration
 
-Example migration registration:
+Example migration registration from `schema_migrator.py`:
 ```python
 def migrate_inventory_v1_to_v2(doc):
     return {
@@ -181,22 +189,80 @@ SchemaMigrator.register_migration(
 
 ### Document Transformation
 
-The connector supports configurable document transformations at different stages:
+The connector features a powerful document transformation system through the `DocumentTransformer` class, supporting multiple stages:
 
 ```python
+# Available transformation stages
+class TransformStage(Enum):
+    PRE_VALIDATION = "pre_validation"  # Before document validation
+    POST_VALIDATION = "post_validation"  # After document validation
+    PRE_PUBLISH = "pre_publish"  # Before publishing to Pub/Sub
+
 # Register a transformation
 transformer.register_transform(
-    TransformStage.PRE_PUBLISH,  # Can be PRE_VALIDATION, POST_VALIDATION, PRE_PUBLISH
+    TransformStage.PRE_PUBLISH,
     DocumentType.INVENTORY,
     transform_function
 )
 ```
 
-Built-in transformations:
-- Adding processing metadata
-- Source identification
-- Schema versioning
-- Custom field transformations
+#### Built-in Security Transformations
+
+The connector includes several built-in transformations for handling sensitive data:
+
+1. **Field Removal**: Completely removes sensitive fields
+```python
+# Remove sensitive fields like PII or payment information 
+transformer.register_transform(
+    TransformStage.PRE_PUBLISH,
+    DocumentType.TRANSACTION,
+    remove_sensitive_fields([
+        "customer_email",
+        "customer_phone",
+        "payment.card_number",
+        "payment.cvv"
+    ])
+)
+```
+
+2. **Field Prefixing**: Adds prefixes for data isolation
+```python
+# Add warehouse prefix for data isolation
+transformer.register_transform(
+    TransformStage.PRE_PUBLISH,
+    DocumentType.INVENTORY,
+    add_field_prefix(f"wh_{config.mongodb.warehouse_id}_")
+)
+```
+
+3. **Metadata Addition**: Adds processing metadata
+```python
+# Add processing metadata to documents
+transformer.register_transform(
+    TransformStage.PRE_PUBLISH,
+    DocumentType.INVENTORY,
+    add_processing_metadata
+)
+```
+
+4. **Transformation Composition**: Combine multiple transformations
+```python
+# Compose multiple transformations
+combined = DocumentTransformer.compose_transforms(
+    add_processing_metadata,
+    remove_sensitive_fields(["customer_email"]),
+    add_field_prefix("wh_123_")
+)
+```
+
+For more details about security transformations, see the `SECURITY.md` document in the project root.
+
+#### Performance Optimization
+
+The `DocumentTransformer` includes caching to optimize performance:
+- LRU cache for frequently transformed documents
+- Deterministic cache keys based on document content
+- Configurable cache size (default: 1000 entries)
 
 ### Structured Logging
 
@@ -301,6 +367,24 @@ The connector implements multiple fault tolerance mechanisms:
 3. **Circuit Breaker**: Prevents cascading failures during outages
 4. **Message Deduplication**: Ensures exactly-once processing
 5. **Graceful Shutdown**: Handles termination signals properly
+
+## Security Features
+
+The connector implements several security features:
+
+1. **Sensitive Data Handling**: 
+   - Automatic removal of sensitive fields like customer email, phone, payment information
+   - Support for field masking and data anonymization
+
+2. **Data Isolation**:
+   - Warehouse prefixing for multi-tenant isolation
+   - Environment-specific configuration
+
+3. **Access Control**:
+   - Service account-based authentication
+   - Least privilege principle for cloud resources
+
+For more details, see the `SECURITY.md` document in the project root.
 
 ## Architecture
 

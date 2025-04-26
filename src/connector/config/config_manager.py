@@ -184,8 +184,92 @@ class ConfigurationManager:
         # Override with environment variables
         self._override_from_env(config_dict)
         
-        # Validate and create config objects
-        return self._create_config_objects(config_dict)
+        # Create and validate config objects
+        config = self._create_config_objects(config_dict)
+        self._validate_config(config)
+        return config
+
+    def _validate_config(self, config: ConnectorConfig) -> None:
+        """Validate configuration values.
+        
+        Args:
+            config: The configuration to validate.
+            
+        Raises:
+            ValueError: If configuration values are invalid.
+        """
+        # Validate MongoDB configuration
+        if not config.mongodb.uri:
+            raise ValueError("MongoDB URI is required")
+        
+        if not config.mongodb.database:
+            raise ValueError("MongoDB database name is required")
+        
+        if not config.mongodb.collections:
+            raise ValueError("At least one collection must be configured")
+        
+        # Validate collection configurations
+        for collection in config.mongodb.collections:
+            if not collection.name:
+                raise ValueError("Collection name is required")
+            if not collection.topic:
+                raise ValueError("Collection topic is required")
+            if collection.deduplication.enabled:
+                if collection.deduplication.memory_ttl <= 0:
+                    raise ValueError("Deduplication memory TTL must be positive")
+                if collection.deduplication.memory_max_size <= 0:
+                    raise ValueError("Deduplication memory max size must be positive")
+                if collection.deduplication.persistent_enabled:
+                    if collection.deduplication.persistent_ttl <= 0:
+                        raise ValueError("Deduplication persistent TTL must be positive")
+                    if collection.deduplication.cleanup_interval <= 0:
+                        raise ValueError("Deduplication cleanup interval must be positive")
+        
+        # Validate Pub/Sub configuration
+        if not config.pubsub.project_id:
+            raise ValueError("Google Cloud project ID is required")
+        
+        # Validate batch settings
+        batch_settings = config.pubsub.publisher.batch_settings
+        if batch_settings.max_messages <= 0:
+            raise ValueError("Publisher batch max_messages must be positive")
+        if batch_settings.max_bytes <= 0:
+            raise ValueError("Publisher batch max_bytes must be positive")
+        if batch_settings.max_latency <= 0:
+            raise ValueError("Publisher batch max_latency must be positive")
+        
+        # Validate circuit breaker settings
+        cb_settings = config.pubsub.publisher.circuit_breaker
+        if cb_settings.failure_threshold <= 0:
+            raise ValueError("Circuit breaker failure threshold must be positive")
+        if cb_settings.reset_timeout <= 0:
+            raise ValueError("Circuit breaker reset timeout must be positive")
+        if cb_settings.half_open_max_calls <= 0:
+            raise ValueError("Circuit breaker half-open max calls must be positive")
+        
+        # Validate retry configuration if present
+        if config.retry:
+            if config.retry.initial_delay <= 0:
+                raise ValueError("Retry initial delay must be positive")
+            if config.retry.max_delay <= 0:
+                raise ValueError("Retry max delay must be positive")
+            if config.retry.multiplier <= 0:
+                raise ValueError("Retry multiplier must be positive")
+            if config.retry.max_attempts <= 0:
+                raise ValueError("Retry max attempts must be positive")
+            if config.retry.max_delay < config.retry.initial_delay:
+                raise ValueError("Retry max delay must be greater than or equal to initial delay")
+        
+        # Validate health configuration if present
+        if config.health:
+            if config.health.heartbeat.interval <= 0:
+                raise ValueError("Heartbeat interval must be positive")
+            if config.health.readiness.timeout <= 0:
+                raise ValueError("Readiness probe timeout must be positive")
+            if config.health.readiness.interval <= 0:
+                raise ValueError("Readiness probe interval must be positive")
+            if config.health.readiness.failure_threshold <= 0:
+                raise ValueError("Readiness probe failure threshold must be positive")
 
     def _load_yaml_config(self) -> Dict[str, Any]:
         """Load configuration from YAML file.
@@ -287,12 +371,22 @@ class ConfigurationManager:
                 options=config["mongodb"].get("options", {})
             )
             
-            # Create Pub/Sub config
+            # Create Pub/Sub config with proper batch settings
+            pubsub_config_dict = config["pubsub"]
+            publisher_config_dict = pubsub_config_dict.get("publisher", {})
+            batch_settings = BatchSettings(**publisher_config_dict.get("batch_settings", {}))
+            
+            publisher_config = PublisherConfig(
+                batch_settings=batch_settings,
+                retry=publisher_config_dict.get("retry"),
+                circuit_breaker=CircuitBreakerSettings(**publisher_config_dict.get("circuit_breaker", {}))
+            )
+            
             pubsub_config = PubSubConfig(
-                project_id=config["pubsub"]["project_id"],
-                publisher=PublisherConfig(**config["pubsub"].get("publisher", {})),
-                status_topic=config["pubsub"].get("status_topic"),
-                default_topic_settings=config["pubsub"].get("default_topic_settings", {})
+                project_id=pubsub_config_dict["project_id"],
+                publisher=publisher_config,
+                status_topic=pubsub_config_dict.get("status_topic"),
+                default_topic_settings=pubsub_config_dict.get("default_topic_settings", {})
             )
             
             # Create optional configs if present
