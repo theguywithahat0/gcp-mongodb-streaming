@@ -206,65 +206,59 @@ class TestTransformationFunctions(unittest.TestCase):
     
     def test_add_processing_metadata(self):
         """Test adding processing metadata to documents."""
-        doc = {
-            "product_id": "P123",
-            "quantity": 10
-        }
+        # Test document
+        doc = {"field": "value"}
         
-        # Apply transformation
+        # Transform document
         result = add_processing_metadata(doc)
         
         # Verify metadata was added
         self.assertIn("_processing_metadata", result)
         self.assertIn("processed_at", result["_processing_metadata"])
         self.assertIn("processor_version", result["_processing_metadata"])
+        self.assertEqual(result["_processing_metadata"]["processor_version"], "1.0")
+        self.assertIsInstance(result["_processing_metadata"]["processed_at"], str)
         
+        # Verify original document was not modified
+        self.assertEqual(doc, {"field": "value"})
+
     def test_add_field_prefix(self):
-        """Test adding prefix to fields."""
+        """Test adding prefix to specified fields."""
+        # Create transformer
+        transformer = add_field_prefix("test", ["field1", "nested.field2"])
+        
+        # Test document
         doc = {
-            "product_id": "P123",
-            "quantity": 10,
-            "location": {
-                "warehouse": "W1",
-                "shelf": "S2"
-            }
+            "field1": "value1",
+            "field2": "value2",
+            "nested": {
+                "field1": "nested1",
+                "field2": "nested2"
+            },
+            "_metadata": "unchanged"
         }
         
-        # Apply transformation to all fields
-        result = add_field_prefix("prefix_")(doc)
+        # Transform document
+        result = transformer(doc)
         
-        # Verify prefixes were added to top-level fields
-        self.assertIn("prefix_product_id", result)
-        self.assertEqual(result["prefix_product_id"], "P123")
-        self.assertIn("prefix_quantity", result)
-        self.assertEqual(result["prefix_quantity"], 10)
-        self.assertIn("prefix_location", result)
+        # Verify prefixes were added correctly
+        self.assertIn("test_field1", result)
+        self.assertIn("field2", result)  # Not in fields list, shouldn't be prefixed
+        self.assertIn("test_field2", result["nested"])  # In fields list as nested.field2
+        self.assertIn("field1", result["nested"])  # Not in fields list
+        self.assertIn("_metadata", result)  # Metadata fields shouldn't be prefixed
         
-        # Verify original fields were removed
-        self.assertNotIn("product_id", result)
-        self.assertNotIn("quantity", result)
-        self.assertNotIn("location", result)
+        # Verify metadata was added
+        self.assertIn("_security_metadata", result)
+        self.assertIn("prefixed_at", result["_security_metadata"])
+        self.assertIsInstance(result["_security_metadata"]["prefixed_at"], str)
+        self.assertIn("prefixed_fields", result["_security_metadata"])
+        self.assertEqual(set(result["_security_metadata"]["prefixed_fields"]), {"field1", "nested.field2"})
         
-        # Test with specific fields only
-        doc = {
-            "product_id": "P123",
-            "quantity": 10,
-            "warehouse_id": "W1"
-        }
-        
-        # Apply transformation to specific fields
-        result = add_field_prefix("wh_", ["warehouse_id"])(doc)
-        
-        # Verify prefix was added only to specified field
-        self.assertIn("wh_warehouse_id", result)
-        self.assertEqual(result["wh_warehouse_id"], "W1")
-        
-        # Verify other fields were not modified
-        self.assertIn("product_id", result)
-        self.assertEqual(result["product_id"], "P123")
-        self.assertIn("quantity", result)
-        self.assertEqual(result["quantity"], 10)
-        
+        # Verify original document was not modified
+        self.assertEqual(doc["field1"], "value1")
+        self.assertEqual(doc["nested"]["field2"], "nested2")
+
     def test_remove_sensitive_fields(self):
         """Test removing sensitive fields."""
         doc = {

@@ -3,7 +3,7 @@
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from enum import Enum
 from ..logging.logging_config import get_logger
-from datetime import datetime
+from datetime import datetime, UTC
 import hashlib
 import json
 from functools import lru_cache
@@ -322,15 +322,14 @@ def remove_sensitive_fields(fields_to_remove: List[str]) -> TransformFunc:
 
 def add_field_prefix(prefix: str, fields: Optional[List[str]] = None) -> TransformFunc:
     """Create a transformation function that adds a prefix to field names.
-    
+
     Args:
-        prefix: The prefix to add to field names.
-        fields: Optional list of specific fields to prefix. If None, prefixes all fields
-               except metadata fields.
-        
+        prefix (str): The prefix to add to field names.
+        fields (Optional[List[str]], optional): List of fields to prefix. If None, all fields are prefixed.
+
     Returns:
-        A transformation function that adds prefixes to specified fields.
-        
+        TransformFunc: A function that prefixes specified fields in documents.
+
     Example:
         ```python
         add_warehouse_prefix = add_field_prefix('wh_123_')
@@ -342,29 +341,48 @@ def add_field_prefix(prefix: str, fields: Optional[List[str]] = None) -> Transfo
         ```
     """
     def transform(doc: Dict[str, Any]) -> Dict[str, Any]:
-        result = {}
-        # Fields that should never be prefixed
-        protected_fields = {
-            "_id", "_processing_metadata", "_security_metadata", 
-            "_schema_version", "document_type"
+        # Initialize security metadata
+        metadata = {
+            "field_prefix": prefix,
+            "prefixed_at": datetime.now(UTC).isoformat(),
+            "prefixed_fields": []
         }
-        
-        for key, value in doc.items():
-            if key in protected_fields:
-                result[key] = value
-            elif fields is None or key in fields:
-                # Only prefix if no fields specified or key is in fields list
-                result[f"{prefix}{key}"] = value
-            else:
-                result[key] = value
+
+        def add_prefix_recursive(obj: Dict[str, Any], current_path: str = "") -> Dict[str, Any]:
+            if not isinstance(obj, dict):
+                return obj
+
+            result = {}
+            for key, value in obj.items():
+                # Skip metadata fields
+                if key.startswith("_"):
+                    result[key] = value
+                    continue
+
+                field_path = f"{current_path}.{key}" if current_path else key
+
+                # Check if field should be prefixed
+                should_prefix = fields is None or field_path in fields
                 
-        # Add metadata about prefixing
-        if "_security_metadata" not in result:
-            result["_security_metadata"] = {}
-        result["_security_metadata"]["field_prefix"] = prefix
-        result["_security_metadata"]["prefixed_at"] = datetime.utcnow().isoformat()
-        
+                # Handle nested dictionaries
+                if isinstance(value, dict):
+                    result[key if not should_prefix else f"{prefix}_{key}"] = add_prefix_recursive(
+                        value, field_path
+                    )
+                    if should_prefix:
+                        metadata["prefixed_fields"].append(field_path)
+                else:
+                    if should_prefix:
+                        result[f"{prefix}_{key}"] = value
+                        metadata["prefixed_fields"].append(field_path)
+                    else:
+                        result[key] = value
+
+            return result
+
+        result = add_prefix_recursive(doc.copy())
+        result["_security_metadata"] = metadata
         return result
-    
+
     transform.__name__ = f"add_field_prefix_{prefix}"
     return transform 
