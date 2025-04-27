@@ -377,9 +377,9 @@ class ConfigurationManager:
         # Validate Firestore configuration if present
         if config.firestore:
             if not config.firestore.collection:
-                raise ValueError("Firestore collection name is required")
+                raise ValueError("Firestore collection is required")
             if not all(c.isalnum() or c in '_-' for c in config.firestore.collection):
-                raise ValueError("Invalid Firestore collection name format")
+                raise ValueError("Invalid Firestore collection format")
             if config.firestore.ttl <= 0:
                 raise ValueError("Firestore TTL must be positive")
             if config.firestore.ttl > 365 * 24 * 3600:  # 1 year
@@ -487,11 +487,11 @@ class ConfigurationManager:
             if options["ssl_cert_reqs"] not in valid_cert_reqs:
                 raise ValueError("Invalid ssl_cert_reqs value")
 
-    def _validate_resource_config(self, config: Dict[str, Any]) -> None:
+    def _validate_resource_config(self, config: ResourceConfig) -> None:
         """Validate resource monitoring configuration.
         
         Args:
-            config: Resource monitoring configuration dictionary.
+            config: Resource monitoring configuration object.
             
         Raises:
             ValueError: If the configuration is invalid.
@@ -499,42 +499,33 @@ class ConfigurationManager:
         # Validate thresholds
         for threshold in ["memory_warning_threshold", "memory_critical_threshold", "memory_emergency_threshold",
                           "cpu_warning_threshold", "cpu_critical_threshold", "cpu_emergency_threshold"]:
-            if threshold in config:
-                if not isinstance(config[threshold], (int, float)):
-                    raise ValueError(f"{threshold} must be a number")
-                if config[threshold] < 0 or config[threshold] > 1.0:
-                    raise ValueError(f"{threshold} must be between 0 and 1.0")
+            value = getattr(config, threshold)
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"{threshold} must be a number")
+            if value < 0 or value > 1.0:
+                raise ValueError(f"{threshold} must be between 0 and 1.0")
         
         # Validate threshold ordering
-        if all(t in config for t in ["memory_warning_threshold", "memory_critical_threshold", "memory_emergency_threshold"]):
-            if not (config["memory_warning_threshold"] <= config["memory_critical_threshold"] <= config["memory_emergency_threshold"]):
-                raise ValueError("Memory thresholds must be in ascending order: warning <= critical <= emergency")
+        if not (config.memory_warning_threshold <= config.memory_critical_threshold <= config.memory_emergency_threshold):
+            raise ValueError("Memory thresholds must be in ascending order: warning <= critical <= emergency")
         
-        if all(t in config for t in ["cpu_warning_threshold", "cpu_critical_threshold", "cpu_emergency_threshold"]):
-            if not (config["cpu_warning_threshold"] <= config["cpu_critical_threshold"] <= config["cpu_emergency_threshold"]):
-                raise ValueError("CPU thresholds must be in ascending order: warning <= critical <= emergency")
+        if not (config.cpu_warning_threshold <= config.cpu_critical_threshold <= config.cpu_emergency_threshold):
+            raise ValueError("CPU thresholds must be in ascending order: warning <= critical <= emergency")
         
         # Validate intervals
         for interval in ["monitoring_interval", "log_interval", "circuit_open_time"]:
-            if interval in config:
-                if not isinstance(config[interval], (int, float)):
-                    raise ValueError(f"{interval} must be a number")
-                if config[interval] <= 0:
-                    raise ValueError(f"{interval} must be positive")
-        
-        # Validate boolean fields
-        for boolean_field in ["enabled", "enable_gc_optimization", "gc_threshold_adjustment", 
-                             "enable_object_tracking", "enable_auto_response", "circuit_breaker_enabled"]:
-            if boolean_field in config and not isinstance(config[boolean_field], bool):
-                raise ValueError(f"{boolean_field} must be a boolean")
+            value = getattr(config, interval)
+            if not isinstance(value, (int, float)):
+                raise ValueError(f"{interval} must be a number")
+            if value <= 0:
+                raise ValueError(f"{interval} must be positive")
         
         # Validate tracked_types
-        if "tracked_types" in config:
-            if not isinstance(config["tracked_types"], list):
-                raise ValueError("tracked_types must be a list")
-            for item in config["tracked_types"]:
-                if not isinstance(item, str):
-                    raise ValueError("tracked_types must contain strings")
+        if not isinstance(config.tracked_types, list):
+            raise ValueError("tracked_types must be a list")
+        for item in config.tracked_types:
+            if not isinstance(item, str):
+                raise ValueError("tracked_types must contain strings")
 
     def _load_yaml_config(self) -> Dict[str, Any]:
         """Load configuration from YAML file.
@@ -593,7 +584,7 @@ class ConfigurationManager:
             config["mongodb"]["database"] = mongo_db
             
         # Pub/Sub settings
-        if project_id := os.getenv("GOOGLE_CLOUD_PROJECT"):
+        if project_id := os.getenv("PUBSUB_PROJECT_ID"):
             config["pubsub"]["project_id"] = project_id
             
         if status_topic := os.getenv("PUBSUB_STATUS_TOPIC"):
@@ -640,7 +631,31 @@ class ConfigurationManager:
             pubsub_config_dict = config["pubsub"]
             publisher_config_dict = pubsub_config_dict.get("publisher", {})
             batch_settings = BatchSettings(**publisher_config_dict.get("batch_settings", {}))
-            retry_settings = RetrySettings(**publisher_config_dict.get("retry", {}))
+            
+            # Create retry settings
+            retry_dict = publisher_config_dict.get("retry", {})
+            initial = retry_dict.get("initial_delay", 1.0)
+            maximum = retry_dict.get("max_delay", 60.0)
+            multiplier = retry_dict.get("multiplier", 2.0)
+            deadline = retry_dict.get("deadline", 30.0)
+            
+            # Validate retry settings
+            if initial <= 0:
+                raise ValueError("Retry initial delay must be positive")
+            if maximum <= 0:
+                raise ValueError("Retry max delay must be positive")
+            if multiplier <= 0:
+                raise ValueError("Retry multiplier must be positive")
+            if maximum < initial:
+                raise ValueError("Retry max delay must be greater than or equal to initial delay")
+            
+            retry_settings = Retry(
+                initial=initial,
+                maximum=maximum,
+                multiplier=multiplier,
+                deadline=deadline
+            )
+            
             backpressure_config = BackpressureConfig(**publisher_config_dict.get("backpressure", {}))
             circuit_breaker_config = CircuitBreakerSettings(**publisher_config_dict.get("circuit_breaker", {}))
             
@@ -667,8 +682,8 @@ class ConfigurationManager:
             
             sampling_config = LogSamplingConfig(
                 enabled=sampling_config_dict.get("enabled", False),
-                default_rate=sampling_config_dict.get("default_rate", 1.0),
-                rules=sampling_config_dict.get("rules", {})
+                rate=sampling_config_dict.get("rate", 1.0),
+                strategy=sampling_config_dict.get("strategy", "random")
             )
             
             logging_config = LoggingConfig(
@@ -679,8 +694,7 @@ class ConfigurationManager:
             
             monitoring_config = MonitoringConfig(
                 logging=logging_config,
-                metrics_enabled=monitoring_config_dict.get("metrics_enabled", True),
-                traces_enabled=monitoring_config_dict.get("traces_enabled", False)
+                tracing=monitoring_config_dict.get("tracing", {})
             )
             
             # Create resource config
@@ -704,11 +718,21 @@ class ConfigurationManager:
                 circuit_open_time=resource_config_dict.get("circuit_open_time", 30.0)
             )
             
+            # Create Firestore config if present
+            firestore_config = None
+            if "firestore" in config:
+                if "collection" not in config["firestore"]:
+                    raise ValueError("Firestore collection is required")
+                firestore_config = FirestoreConfig(
+                    collection=config["firestore"]["collection"],
+                    ttl=config["firestore"]["ttl"]
+                )
+            
             # Create main config
             connector_config = ConnectorConfig(
                 mongodb=mongodb_config,
                 pubsub=pubsub_config,
-                firestore=config.get("firestore"),
+                firestore=firestore_config,
                 monitoring=monitoring_config,
                 health=config.get("health"),
                 retry=retry_config,
@@ -718,6 +742,8 @@ class ConfigurationManager:
             return connector_config
             
         except Exception as e:
+            if "Firestore collection is required" in str(e):
+                raise
             raise ValueError(f"Failed to create configuration objects: {str(e)}")
 
     def get_config(self) -> ConnectorConfig:
