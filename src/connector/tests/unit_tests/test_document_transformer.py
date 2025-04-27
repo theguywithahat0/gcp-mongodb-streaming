@@ -201,6 +201,160 @@ class TestDocumentTransformer(unittest.TestCase):
         self.assertIn("field_b", result)
         self.assertEqual(result["field_b"], "value_b")
 
+    def test_register_transform_with_position(self):
+        """Test registering a transformation function at a specific position."""
+        # Mock transform functions
+        transform_1 = lambda doc: {**doc, "field1": "value1"}
+        transform_2 = lambda doc: {**doc, "field2": "value2"}
+        transform_3 = lambda doc: {**doc, "field3": "value3"}
+        
+        # Register transforms
+        self.transformer.register_transform(
+            TransformStage.PRE_VALIDATION,
+            DocumentType.INVENTORY,
+            transform_1
+        )
+        self.transformer.register_transform(
+            TransformStage.PRE_VALIDATION,
+            DocumentType.INVENTORY,
+            transform_2
+        )
+        self.transformer.register_transform(
+            TransformStage.PRE_VALIDATION,
+            DocumentType.INVENTORY,
+            transform_3,
+            position=1  # Insert between transform_1 and transform_2
+        )
+        
+        # Test document
+        doc = {"test": "value"}
+        
+        # Apply transforms
+        result = self.transformer.apply_transforms(
+            doc,
+            DocumentType.INVENTORY,
+            TransformStage.PRE_VALIDATION
+        )
+        
+        # Verify order of transformations
+        self.assertEqual(result["field1"], "value1")  # First transform
+        self.assertEqual(result["field3"], "value3")  # Second transform (inserted at position 1)
+        self.assertEqual(result["field2"], "value2")  # Third transform
+
+    def test_clear_transforms(self):
+        """Test clearing transformations."""
+        # Mock transform function
+        transform_func = lambda doc: doc
+        
+        # Register transforms for different stages and types
+        self.transformer.register_transform(
+            TransformStage.PRE_VALIDATION,
+            DocumentType.INVENTORY,
+            transform_func
+        )
+        self.transformer.register_transform(
+            TransformStage.POST_VALIDATION,
+            DocumentType.TRANSACTION,
+            transform_func
+        )
+        
+        # Test clearing specific stage
+        self.transformer.clear_transforms(stage=TransformStage.PRE_VALIDATION)
+        self.assertEqual(len(self.transformer._transforms[TransformStage.PRE_VALIDATION][DocumentType.INVENTORY]), 0)
+        self.assertEqual(len(self.transformer._transforms[TransformStage.POST_VALIDATION][DocumentType.TRANSACTION]), 1)
+        
+        # Test clearing specific document type
+        self.transformer.clear_transforms(doc_type=DocumentType.TRANSACTION)
+        self.assertEqual(len(self.transformer._transforms[TransformStage.POST_VALIDATION][DocumentType.TRANSACTION]), 0)
+        
+        # Register new transforms
+        self.transformer.register_transform(
+            TransformStage.PRE_VALIDATION,
+            DocumentType.INVENTORY,
+            transform_func
+        )
+        
+        # Test clearing all transforms
+        self.transformer.clear_transforms()
+        for stage in TransformStage:
+            for doc_type in DocumentType:
+                self.assertEqual(len(self.transformer._transforms[stage][doc_type]), 0)
+
+    def test_compose_transforms(self):
+        """Test composing multiple transformation functions."""
+        # Define transform functions
+        def add_field_1(doc):
+            return {**doc, "field1": "value1"}
+            
+        def add_field_2(doc):
+            return {**doc, "field2": "value2"}
+            
+        def add_timestamp(doc):
+            return {**doc, "timestamp": "2024-01-01"}
+        
+        # Compose transforms
+        composed = DocumentTransformer.compose_transforms(
+            add_field_1,
+            add_field_2,
+            add_timestamp
+        )
+        
+        # Verify composed function name
+        self.assertEqual(
+            composed.__name__,
+            "composed_add_field_1_add_field_2_add_timestamp"
+        )
+        
+        # Test composed transformation
+        doc = {"original": "value"}
+        result = composed(doc)
+        
+        # Verify all transformations were applied in order
+        self.assertEqual(result["field1"], "value1")
+        self.assertEqual(result["field2"], "value2")
+        self.assertEqual(result["timestamp"], "2024-01-01")
+        self.assertEqual(result["original"], "value")
+
+    def test_remove_sensitive_fields_error_handling(self):
+        """Test error handling in remove_sensitive_fields."""
+        # Test with invalid nested path
+        doc = {
+            "customer": "not_a_dict",  # This will cause the nested path to fail
+            "other_field": "value"
+        }
+        
+        transform = remove_sensitive_fields(["customer.email"])
+        result = transform(doc)
+        
+        # Verify document wasn't modified (except for metadata)
+        self.assertEqual(result["customer"], "not_a_dict")
+        self.assertEqual(result["other_field"], "value")
+        self.assertIn("_security_metadata", result)
+
+    def test_add_field_prefix_edge_cases(self):
+        """Test edge cases in add_field_prefix."""
+        # Test with non-dict value in nested structure
+        doc = {
+            "field1": {
+                "nested": "value",
+                "other": ["not_a_dict"]
+            }
+        }
+        
+        transformer = add_field_prefix("test", ["field1.nested", "field1.other"])
+        result = transformer(doc)
+        
+        # Verify prefixing works at the nested level
+        self.assertIn("field1", result)
+        self.assertIn("test_nested", result["field1"])
+        self.assertIn("test_other", result["field1"])
+        self.assertEqual(result["field1"]["test_nested"], "value")
+        self.assertEqual(result["field1"]["test_other"], ["not_a_dict"])
+        
+        # Verify metadata was added
+        self.assertIn("_security_metadata", result)
+        self.assertEqual(set(result["_security_metadata"]["prefixed_fields"]), {"field1.nested", "field1.other"})
+
 class TestTransformationFunctions(unittest.TestCase):
     """Test cases for the built-in transformation functions."""
     
