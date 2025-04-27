@@ -269,7 +269,7 @@ def add_processing_metadata(doc: Dict[str, Any]) -> Dict[str, Any]:
     return {
         **doc,
         "_processing_metadata": {
-            "processed_at": datetime.utcnow().isoformat(),
+            "processed_at": datetime.now(UTC).isoformat(),
             "processor_version": "1.0"
         }
     }
@@ -313,7 +313,7 @@ def remove_sensitive_fields(fields_to_remove: List[str]) -> TransformFunc:
         if "_security_metadata" not in result:
             result["_security_metadata"] = {}
         result["_security_metadata"]["removed_fields"] = fields_to_remove
-        result["_security_metadata"]["sanitized_at"] = datetime.utcnow().isoformat()
+        result["_security_metadata"]["sanitized_at"] = datetime.now(UTC).isoformat()
         
         return result
     
