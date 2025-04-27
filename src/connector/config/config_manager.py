@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 from enum import Enum
 
 import yaml
@@ -159,6 +159,37 @@ class RetryConfig:
     max_attempts: int = 5
 
 @dataclass
+class ResourceConfig:
+    """Configuration for resource monitoring and optimization."""
+    # Monitoring settings
+    enabled: bool = True
+    monitoring_interval: float = 30.0  # Seconds between resource checks
+    log_interval: float = 300.0  # Seconds between detailed resource logs
+    
+    # Memory thresholds
+    memory_warning_threshold: float = 0.70  # 70% of available memory
+    memory_critical_threshold: float = 0.85  # 85% of available memory
+    memory_emergency_threshold: float = 0.95  # 95% of available memory
+    
+    # CPU thresholds
+    cpu_warning_threshold: float = 0.70  # 70% CPU utilization
+    cpu_critical_threshold: float = 0.85  # 85% CPU utilization
+    cpu_emergency_threshold: float = 0.95  # 95% CPU utilization
+    
+    # Optimization settings
+    enable_gc_optimization: bool = True  # Enable garbage collection optimization
+    gc_threshold_adjustment: bool = True  # Adjust GC thresholds based on memory pressure
+    enable_object_tracking: bool = False  # Track object counts by type (can be expensive)
+    tracked_types: List[str] = field(default_factory=lambda: ["dict", "ChangeStream", "Message"])
+    
+    # Response actions
+    enable_auto_response: bool = True  # Enable automatic resource optimization
+    
+    # Circuit breaker
+    circuit_breaker_enabled: bool = True  # Enable circuit breaker for resource exhaustion
+    circuit_open_time: float = 30.0  # Time in seconds to keep circuit open
+
+@dataclass
 class ConnectorConfig:
     """Main configuration class for the connector."""
     mongodb: MongoDBConfig
@@ -167,6 +198,7 @@ class ConnectorConfig:
     monitoring: Optional[MonitoringConfig] = None
     health: Optional[HealthConfig] = None
     retry: Optional[RetryConfig] = None
+    resource: ResourceConfig = field(default_factory=ResourceConfig)
 
 class ConfigurationManager:
     """Manages loading and validation of configuration."""
@@ -401,6 +433,9 @@ class ConfigurationManager:
         if bp_settings.metrics_window_size <= 0:
             raise ValueError("Backpressure metrics_window_size must be positive")
 
+        # Validate resource configuration
+        self._validate_resource_config(config.resource)
+
     def _validate_mongodb_options(self, options: Dict[str, Any]) -> None:
         """Validate MongoDB connection options.
         
@@ -451,6 +486,55 @@ class ConfigurationManager:
             valid_cert_reqs = ["CERT_NONE", "CERT_OPTIONAL", "CERT_REQUIRED"]
             if options["ssl_cert_reqs"] not in valid_cert_reqs:
                 raise ValueError("Invalid ssl_cert_reqs value")
+
+    def _validate_resource_config(self, config: Dict[str, Any]) -> None:
+        """Validate resource monitoring configuration.
+        
+        Args:
+            config: Resource monitoring configuration dictionary.
+            
+        Raises:
+            ValueError: If the configuration is invalid.
+        """
+        # Validate thresholds
+        for threshold in ["memory_warning_threshold", "memory_critical_threshold", "memory_emergency_threshold",
+                          "cpu_warning_threshold", "cpu_critical_threshold", "cpu_emergency_threshold"]:
+            if threshold in config:
+                if not isinstance(config[threshold], (int, float)):
+                    raise ValueError(f"{threshold} must be a number")
+                if config[threshold] < 0 or config[threshold] > 1.0:
+                    raise ValueError(f"{threshold} must be between 0 and 1.0")
+        
+        # Validate threshold ordering
+        if all(t in config for t in ["memory_warning_threshold", "memory_critical_threshold", "memory_emergency_threshold"]):
+            if not (config["memory_warning_threshold"] <= config["memory_critical_threshold"] <= config["memory_emergency_threshold"]):
+                raise ValueError("Memory thresholds must be in ascending order: warning <= critical <= emergency")
+        
+        if all(t in config for t in ["cpu_warning_threshold", "cpu_critical_threshold", "cpu_emergency_threshold"]):
+            if not (config["cpu_warning_threshold"] <= config["cpu_critical_threshold"] <= config["cpu_emergency_threshold"]):
+                raise ValueError("CPU thresholds must be in ascending order: warning <= critical <= emergency")
+        
+        # Validate intervals
+        for interval in ["monitoring_interval", "log_interval", "circuit_open_time"]:
+            if interval in config:
+                if not isinstance(config[interval], (int, float)):
+                    raise ValueError(f"{interval} must be a number")
+                if config[interval] <= 0:
+                    raise ValueError(f"{interval} must be positive")
+        
+        # Validate boolean fields
+        for boolean_field in ["enabled", "enable_gc_optimization", "gc_threshold_adjustment", 
+                             "enable_object_tracking", "enable_auto_response", "circuit_breaker_enabled"]:
+            if boolean_field in config and not isinstance(config[boolean_field], bool):
+                raise ValueError(f"{boolean_field} must be a boolean")
+        
+        # Validate tracked_types
+        if "tracked_types" in config:
+            if not isinstance(config["tracked_types"], list):
+                raise ValueError("tracked_types must be a list")
+            for item in config["tracked_types"]:
+                if not isinstance(item, str):
+                    raise ValueError("tracked_types must contain strings")
 
     def _load_yaml_config(self) -> Dict[str, Any]:
         """Load configuration from YAML file.
@@ -556,62 +640,85 @@ class ConfigurationManager:
             pubsub_config_dict = config["pubsub"]
             publisher_config_dict = pubsub_config_dict.get("publisher", {})
             batch_settings = BatchSettings(**publisher_config_dict.get("batch_settings", {}))
+            retry_settings = RetrySettings(**publisher_config_dict.get("retry", {}))
+            backpressure_config = BackpressureConfig(**publisher_config_dict.get("backpressure", {}))
+            circuit_breaker_config = CircuitBreakerSettings(**publisher_config_dict.get("circuit_breaker", {}))
             
             publisher_config = PublisherConfig(
                 batch_settings=batch_settings,
-                retry=publisher_config_dict.get("retry"),
-                circuit_breaker=CircuitBreakerSettings(**publisher_config_dict.get("circuit_breaker", {})),
-                backpressure=BackpressureConfig(**publisher_config_dict.get("backpressure", {}))
+                retry=retry_settings,
+                backpressure=backpressure_config,
+                circuit_breaker=circuit_breaker_config
             )
             
             pubsub_config = PubSubConfig(
                 project_id=pubsub_config_dict["project_id"],
-                publisher=publisher_config,
-                status_topic=pubsub_config_dict.get("status_topic"),
-                default_topic_settings=pubsub_config_dict.get("default_topic_settings", {})
+                status_topic=pubsub_config_dict["status_topic"],
+                publisher=publisher_config
             )
             
-            # Create optional configs if present
-            firestore_config = None
-            if "firestore" in config:
-                firestore_config = FirestoreConfig(**config["firestore"])
-                
-            monitoring_config = None
-            if "monitoring" in config:
-                logging_config = LoggingConfig(
-                    level=config["monitoring"]["logging"].get("level", "INFO"),
-                    format=config["monitoring"]["logging"].get("format", "json"),
-                    handlers=config["monitoring"]["logging"].get("handlers", []),
-                    sampling=LogSamplingConfig(**config["monitoring"]["logging"].get("sampling", {}))
-                )
-                monitoring_config = MonitoringConfig(
-                    logging=logging_config,
-                    tracing=config["monitoring"]["tracing"]
-                )
-                
-            health_config = None
-            if "health" in config:
-                health_config = HealthConfig(
-                    endpoints=HealthEndpointsConfig(**config["health"].get("endpoints", {})),
-                    readiness=ReadinessConfig(**config["health"].get("readiness", {})),
-                    heartbeat=HeartbeatConfig(**config["health"].get("heartbeat", {}))
-                )
-                
-            retry_config = None
-            if "retry" in config:
-                retry_config = RetryConfig(**config["retry"])
+            # Create retry config
+            retry_config = RetryConfig(**config.get("retry", {}))
             
-            return ConnectorConfig(
+            # Create monitoring config
+            monitoring_config_dict = config.get("monitoring", {})
+            logging_config_dict = monitoring_config_dict.get("logging", {})
+            sampling_config_dict = logging_config_dict.get("sampling", {})
+            
+            sampling_config = LogSamplingConfig(
+                enabled=sampling_config_dict.get("enabled", False),
+                default_rate=sampling_config_dict.get("default_rate", 1.0),
+                rules=sampling_config_dict.get("rules", {})
+            )
+            
+            logging_config = LoggingConfig(
+                level=logging_config_dict.get("level", "INFO"),
+                format=logging_config_dict.get("format", "json"),
+                sampling=sampling_config
+            )
+            
+            monitoring_config = MonitoringConfig(
+                logging=logging_config,
+                metrics_enabled=monitoring_config_dict.get("metrics_enabled", True),
+                traces_enabled=monitoring_config_dict.get("traces_enabled", False)
+            )
+            
+            # Create resource config
+            resource_config_dict = config.get("resource", {})
+            resource_config = ResourceConfig(
+                enabled=resource_config_dict.get("enabled", True),
+                monitoring_interval=resource_config_dict.get("monitoring_interval", 30.0),
+                log_interval=resource_config_dict.get("log_interval", 300.0),
+                memory_warning_threshold=resource_config_dict.get("memory_warning_threshold", 0.7),
+                memory_critical_threshold=resource_config_dict.get("memory_critical_threshold", 0.85),
+                memory_emergency_threshold=resource_config_dict.get("memory_emergency_threshold", 0.95),
+                cpu_warning_threshold=resource_config_dict.get("cpu_warning_threshold", 0.7),
+                cpu_critical_threshold=resource_config_dict.get("cpu_critical_threshold", 0.85),
+                cpu_emergency_threshold=resource_config_dict.get("cpu_emergency_threshold", 0.95),
+                enable_gc_optimization=resource_config_dict.get("enable_gc_optimization", True),
+                gc_threshold_adjustment=resource_config_dict.get("gc_threshold_adjustment", True),
+                enable_object_tracking=resource_config_dict.get("enable_object_tracking", False),
+                tracked_types=resource_config_dict.get("tracked_types", ["dict", "ChangeStream", "Message"]),
+                enable_auto_response=resource_config_dict.get("enable_auto_response", True),
+                circuit_breaker_enabled=resource_config_dict.get("circuit_breaker_enabled", True),
+                circuit_open_time=resource_config_dict.get("circuit_open_time", 30.0)
+            )
+            
+            # Create main config
+            connector_config = ConnectorConfig(
                 mongodb=mongodb_config,
                 pubsub=pubsub_config,
-                firestore=firestore_config,
+                firestore=config.get("firestore"),
                 monitoring=monitoring_config,
-                health=health_config,
-                retry=retry_config
+                health=config.get("health"),
+                retry=retry_config,
+                resource=resource_config
             )
             
-        except (KeyError, TypeError, ValueError) as e:
-            raise ValueError(f"Invalid configuration: {str(e)}")
+            return connector_config
+            
+        except Exception as e:
+            raise ValueError(f"Failed to create configuration objects: {str(e)}")
 
     def get_config(self) -> ConnectorConfig:
         """Get the loaded configuration.

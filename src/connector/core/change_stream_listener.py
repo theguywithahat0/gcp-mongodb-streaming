@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+import gc
 from typing import Any, Dict, Optional
 from bson import ObjectId
 from datetime import datetime, UTC
@@ -25,6 +26,7 @@ from .document_transformer import (
 )
 from .message_batcher import MessageBatcher, Message
 from .message_deduplication import MessageDeduplication, DeduplicationConfig
+from .resource_monitor import ResourceMonitor, ResourceConfig, ResourceExhaustionError
 from ..utils.json_utils import MongoDBJSONEncoder
 from ..utils.error_utils import with_retries, wrap_error, ErrorCategory, ConnectorError
 from ..utils.serialization import SerializationFormat
@@ -174,6 +176,35 @@ class ChangeStreamListener:
                 firestore_client=self.firestore_client,
                 collection_name=collection_config.name
             )
+        
+        # Initialize resource monitor
+        self.resource_monitor = ResourceMonitor(
+            ResourceConfig(
+                # Set more aggressive thresholds for large change streams
+                memory_warning_threshold=0.65,
+                memory_critical_threshold=0.80,
+                memory_emergency_threshold=0.90,
+                # Track specific types relevant to change streams
+                tracked_types=["dict", "ChangeStream", "Message", "bytes"],
+                # Set monitoring intervals
+                monitoring_interval=30.0,
+                log_interval=300.0  # Log every 5 minutes
+            )
+        )
+        
+        # Register resource optimization callbacks
+        self.resource_monitor.register_callback(
+            'memory_warning', 
+            self._handle_memory_warning
+        )
+        self.resource_monitor.register_callback(
+            'memory_critical', 
+            self._handle_memory_critical
+        )
+        self.resource_monitor.register_callback(
+            'memory_emergency', 
+            self._handle_memory_emergency
+        )
 
     def _load_resume_token(self) -> Optional[Dict[str, Any]]:
         """Load the last resume token from Firestore.
@@ -288,7 +319,22 @@ class ChangeStreamListener:
             await asyncio.sleep(self.config.health.heartbeat.interval)
 
     async def _handle_change(self, change: Dict[str, Any]) -> None:
-        """Handle a single change event."""
+        """Handle a change stream document.
+        
+        Args:
+            change: The change stream document.
+        """
+        # Check resource circuit breaker
+        if not self.resource_monitor.check_circuit_breaker():
+            self.logger.warning(
+                "Change processing temporarily paused due to resource exhaustion",
+                extra={"resume_token": change.get("_id")}
+            )
+            # Save the resume token so we can continue from here later
+            if "_id" in change:
+                self._save_resume_token(change["_id"])
+            return
+
         try:
             # Update last change time
             self.last_change_time = time.time()
@@ -584,27 +630,34 @@ class ChangeStreamListener:
             retries += 1
 
     async def start(self) -> None:
-        """Start listening to the change stream."""
+        """Start the change stream listener."""
         if self.is_running:
             return
 
         self.is_running = True
         self.logger.info("Starting change stream listener")
 
-        # Start heartbeat task
+        # Start resource monitoring
+        await self.resource_monitor.start()
+        
+        # Start heartbeat
         self.heartbeat_task = asyncio.create_task(self._publish_heartbeat())
-
+        
         # Start watching collection
         await self._watch_collection()
 
     async def stop(self) -> None:
-        """Stop watching the collection."""
-        self.is_running = False
-        
-        if self.change_stream:
-            self.change_stream.close()
+        """Stop the change stream listener."""
+        if not self.is_running:
+            return
 
-        # Stop heartbeat task if running
+        self.is_running = False
+        self.logger.info("Stopping change stream listener")
+
+        # Stop resource monitoring
+        await self.resource_monitor.stop()
+        
+        # Stop heartbeat
         if self.heartbeat_task:
             self.heartbeat_task.cancel()
             try:
@@ -612,13 +665,16 @@ class ChangeStreamListener:
             except asyncio.CancelledError:
                 pass
 
-        # Clean up deduplication cache if enabled
-        if self.deduplication:
-            self.deduplication._cleanup_memory()
-            if self.deduplication.config.persistent_enabled:
-                self.deduplication._cleanup_persistent()
-            
-        self.logger.info("change_stream_listener_stopped")
+        # Stop change stream
+        if self.change_stream:
+            self.logger.info("Closing change stream")
+            self.change_stream.close()
+            self.change_stream = None
+        
+        # Flush batcher
+        await self.message_batcher.flush()
+        
+        self.logger.info("Change stream listener stopped")
 
     async def __aenter__(self) -> 'ChangeStreamListener':
         """Context manager entry."""
@@ -627,4 +683,136 @@ class ChangeStreamListener:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         """Context manager exit."""
-        await self.stop() 
+        await self.stop()
+
+    async def _handle_memory_warning(self, metrics: Dict[str, Any]) -> None:
+        """Handle memory warning events.
+        
+        Args:
+            metrics: Current resource metrics
+        """
+        self.logger.warning(
+            "Memory usage warning",
+            extra={
+                "memory_percent": metrics["memory_percent"],
+                "memory_mb": metrics["memory_rss_mb"]
+            }
+        )
+        
+        # Run garbage collection to free up memory
+        gc.collect(0)  # Just collect generation 0
+        
+        # Free up memory in message cache if deduplication is enabled
+        if self.deduplication:
+            self.deduplication._cleanup_memory()
+
+    async def _handle_memory_critical(self, metrics: Dict[str, Any]) -> None:
+        """Handle memory critical events.
+        
+        Args:
+            metrics: Current resource metrics
+        """
+        self.logger.warning(
+            "Memory usage critical",
+            extra={
+                "memory_percent": metrics["memory_percent"],
+                "memory_mb": metrics["memory_rss_mb"]
+            }
+        )
+        
+        # Run garbage collection on generations 0 and 1
+        gc.collect(1)
+        
+        # Free up memory in message cache if deduplication is enabled
+        if self.deduplication:
+            self.deduplication._cleanup_memory()
+        
+        # Flush any batched messages to reduce memory pressure
+        await self.message_batcher.flush()
+
+    async def _handle_memory_emergency(self, metrics: Dict[str, Any]) -> None:
+        """Handle memory emergency events.
+        
+        Args:
+            metrics: Current resource metrics
+        """
+        self.logger.error(
+            "Memory usage emergency",
+            extra={
+                "memory_percent": metrics["memory_percent"],
+                "memory_mb": metrics["memory_rss_mb"]
+            }
+        )
+        
+        # Run full garbage collection
+        gc.collect(2)
+        
+        # Free up memory in message cache if deduplication is enabled
+        if self.deduplication:
+            self.deduplication._cleanup_memory()
+        
+        # Flush any batched messages to reduce memory pressure
+        await self.message_batcher.flush()
+        
+        # If change stream cursor is using too much memory, recreate it
+        if metrics["memory_percent"] > 0.95:
+            self.logger.warning("Recreating change stream due to memory pressure")
+            if self.change_stream:
+                last_resume_token = self.change_stream.resume_token
+                self.change_stream.close()
+                
+                # Wait a moment for resources to be freed
+                await asyncio.sleep(1)
+                
+                # Run garbage collection again
+                gc.collect(2)
+                
+                # Recreate the change stream with the last resume token
+                await self._recreate_change_stream(last_resume_token)
+
+    async def _recreate_change_stream(self, resume_token: Optional[Dict[str, Any]] = None) -> None:
+        """Recreate the change stream after closing it.
+        
+        Args:
+            resume_token: Optional resume token to use
+        """
+        token_to_use = resume_token or self.last_resume_token
+        
+        try:
+            self.logger.info(
+                "Recreating change stream",
+                extra={"has_resume_token": token_to_use is not None}
+            )
+            
+            # Set up the change stream options
+            options = {
+                "full_document": "updateLookup"
+            }
+            
+            # Add resume token if available
+            if token_to_use:
+                options["resume_after"] = token_to_use
+                
+            # Add pipeline stages if configured
+            pipeline = self.collection_config.watch_filter or []
+            
+            # Create the change stream
+            self.change_stream = self.collection.watch(
+                pipeline=pipeline,
+                **options
+            )
+            
+            self.logger.info("Change stream recreated successfully")
+        except Exception as e:
+            wrapped_error = wrap_error(e, {
+                "operation": "recreate_change_stream",
+                "collection": self.collection_config.name
+            })
+            self.logger.error(
+                "Failed to recreate change stream",
+                extra={
+                    "error": str(wrapped_error),
+                    "category": wrapped_error.category.value
+                }
+            )
+            raise 

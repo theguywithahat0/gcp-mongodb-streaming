@@ -255,41 +255,42 @@ combined = DocumentTransformer.compose_transforms(
 )
 ```
 
-For more details about security transformations, see the `SECURITY.md` document in the project root.
+### Security Module
 
-#### Performance Optimization
+The connector includes a dedicated security module for comprehensive data protection. This module provides field-level encryption, masking, hashing, and other security transformations to protect sensitive data in transit.
 
-The `DocumentTransformer` includes caching to optimize performance:
-- LRU cache for frequently transformed documents
-- Deterministic cache keys based on document content
-- Configurable cache size (default: 1000 entries)
+Features include:
+- Field-level protection with multiple methods (hash, mask, encrypt, remove, etc.)
+- Flexible field selection using exact paths or regex patterns
+- Built-in protection rules for PII and payment data
+- Integration with the document transformation pipeline
 
-### Structured Logging
+For detailed documentation, see the [Security Module README](security/README.md).
 
-The connector uses structured JSON logging for better operational visibility and monitoring:
+Example usage:
+```python
+from connector.security import (
+    DataProtector, 
+    FieldProtectionConfig,
+    ProtectionLevel
+)
 
-```json
-{
-    "timestamp": "2024-03-20T10:00:00Z",
-    "level": "INFO",
-    "event": "change_stream_event",
-    "collection": "inventory",
-    "operation": "insert",
-    "warehouse_id": "WH-EAST-1",
-    "document_id": "123456",
-    "correlation_id": "abc-xyz-789",
-    "schema_version": "v1"
-}
+# Create a data protector
+protector = DataProtector()
+
+# Add a protection rule for credit card numbers
+protector.add_protection_rule(
+    FieldProtectionConfig(
+        field_matcher="payment.card_number",
+        protection_level=ProtectionLevel.MASK,
+        options={"visible_right": 4, "mask_char": "X"}
+    )
+)
+
+# Apply protection to a document
+protected_doc = protector.apply_field_protection(original_doc)
+# Result: {"payment": {"card_number": "XXXXXXXXXXXX1234"}}
 ```
-
-Standard log fields:
-- `timestamp`: ISO format timestamp
-- `level`: Log severity (DEBUG, INFO, WARNING, ERROR)
-- `event`: Event type identifier
-- `correlation_id`: Unique identifier for tracking related events
-- `schema_version`: Document schema version
-
-Event-specific fields are included based on the operation type and context.
 
 ## Schema Validation
 
