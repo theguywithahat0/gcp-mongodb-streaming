@@ -44,9 +44,10 @@ A high-performance, fault-tolerant connector that streams MongoDB change events 
 
 ### Monitoring & Observability
 - Structured logging with sampling
-- Health check endpoints
+- Health check endpoints (/health and /readiness)
 - Heartbeat monitoring
-- Performance metrics
+- Performance metrics collection
+- Resource monitoring (memory, CPU)
 - Error tracking and reporting
 
 ## Configuration
@@ -60,10 +61,10 @@ pubsub:
       max_bytes: 1048576     # Maximum batch size (1MB)
       max_latency: 0.05      # Maximum wait time (50ms)
     retry_settings:
-      initial: 1.0
-      maximum: 60.0
-      multiplier: 2.0
-      deadline: 600.0
+      initial_retry_delay: 0.1
+      retry_delay_multiplier: 1.3
+      max_retry_delay: 60
+      max_attempts: 5
 ```
 
 ### Circuit Breaker
@@ -108,34 +109,49 @@ monitoring:
             ttl: 3600        # Cache cleanup after 1 hour
 ```
 
+### Resource Monitoring
+```yaml
+resource:
+  enabled: true
+  monitoring_interval: 30.0  # Check resources every 30 seconds
+  log_interval: 300.0        # Log detailed metrics every 5 minutes
+  
+  # Memory thresholds
+  memory_warning_threshold: 0.65  # 65% memory utilization
+  memory_critical_threshold: 0.80  # 80% memory utilization
+  memory_emergency_threshold: 0.90  # 90% memory utilization
+```
+
 ## Usage
 
 1. Configure your MongoDB and Google Cloud settings in `config.yaml`
-2. Set up the required environment variables:
+2. Run the connector:
    ```bash
-   export GOOGLE_CLOUD_PROJECT="your-project-id"
-   export MONGODB_URI="your-mongodb-uri"
+   python -m src.connector
    ```
-3. Run the connector:
+
+   Or with a specific config file:
    ```bash
-   python -m src.connector.main
+   python -m src.connector --config /path/to/config.yaml
    ```
 
 ## Monitoring
 
-The connector provides several monitoring endpoints:
-- `/health`: Overall health status
-- `/readiness`: Readiness status
-- `/metrics`: Performance metrics
+The connector provides the following monitoring endpoints:
+- `/health`: Overall health status (200 if healthy, 503 if not)
+- `/readiness`: Detailed component readiness status
+
+Internal metrics are collected for memory usage, CPU utilization, and message processing rates, and are available in logs at the configured intervals.
 
 ## Error Handling
 
 The connector implements multiple layers of error handling:
 1. Circuit breaker for Pub/Sub publishing failures
-2. Configurable retry policies
+2. Configurable retry policies with exponential backoff
 3. Message deduplication to prevent duplicates
 4. Automatic resume token management
 5. Graceful shutdown handling
+6. Resource monitoring with automated responses to memory pressure
 
 ## Best Practices
 
@@ -159,6 +175,14 @@ The connector implements multiple layers of error handling:
    - Use rate limiting for burst-prone events
    - Keep critical logs unsampled
    - Adjust sampling rates based on monitoring needs
+
+## Testing
+
+The connector includes:
+- Unit tests for core components
+- End-to-end tests with MongoDB replica set and emulators
+
+To run the end-to-end tests, see `src/connector/tests/e2e_tests/README.md` for detailed instructions.
 
 ## Contributing
 

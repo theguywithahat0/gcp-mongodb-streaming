@@ -40,15 +40,15 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-3. Set up environment variables:
+3. Configure your settings in `config.yaml`:
 ```bash
-cp .env.example .env
-# Edit .env with your configuration
+cp config/config.yaml.example config/config.yaml
+# Edit config.yaml with your settings
 ```
 
 ## Configuration
 
-The connector can be configured through environment variables or a YAML configuration file. See `config/config.yaml.example` for available options.
+The connector is configured through a YAML configuration file. See `config/config.yaml.example` for available options.
 
 Key configuration options:
 - MongoDB connection settings
@@ -114,8 +114,12 @@ monitoring:
   logging:
     sampling:
       enabled: true
-      rate: 0.1
-      strategy: "random"  # random, systematic, or reservoir
+      default_rate: 1.0      # Sample all by default
+      rules:
+        DEBUG:
+          "change_event_processed":
+            rate: 0.1        # Sample 10% of events
+            strategy: "probabilistic"
 ```
 
 ### Schema Versioning
@@ -128,34 +132,46 @@ The connector includes a robust schema versioning system that ensures data consi
 - Automatic version detection and validation
 - Easy addition of new schema versions
 
-Example schema version from `schema_registry.py`:
 ```python
-INVENTORY_SCHEMAS = {
-    "v1": {
-        "type": "object",
-        "required": [
-            "_schema_version",
-            "product_id",
-            "warehouse_id",
-            "quantity",
-            "last_updated"
-        ],
-        "properties": {
-            "_schema_version": {"type": "string", "enum": ["v1"]},
-            "product_id": {"type": "string"},
-            "warehouse_id": {"type": "string"},
-            "quantity": {"type": "integer", "minimum": 0},
-            "last_updated": {"type": "string", "format": "date-time"},
-            # Optional fields
-            "category": {"type": "string"},
-            "brand": {"type": "string"},
-            "sku": {"type": "string"},
-            "threshold_min": {"type": "integer", "minimum": 0},
-            "threshold_max": {"type": "integer", "minimum": 0}
-        },
-        "additionalProperties": true
-    }
-}
+# Example schema types in schema_registry.py
+class DocumentType(str, Enum):
+    """Document types for schema validation."""
+    INVENTORY = "inventory"
+    TRANSACTION = "transaction"
+
+# Schema registry with validation schemas
+class SchemaRegistry:
+    """Registry for document schemas with version support."""
+    
+    # Initialize registry with schemas for each document type
+    def __init__(self):
+        """Initialize schema registry."""
+        self.schemas = {
+            DocumentType.INVENTORY: {
+                "v1": {
+                    "type": "object",
+                    "required": ["_id", "product_id", "quantity", "last_updated"],
+                    "properties": {
+                        "_id": {"type": "string"},
+                        "product_id": {"type": "string"},
+                        "quantity": {"type": "integer", "minimum": 0},
+                        "last_updated": {"type": "string", "format": "date-time"}
+                    }
+                }
+            },
+            DocumentType.TRANSACTION: {
+                "v1": {
+                    "type": "object",
+                    "required": ["_id", "product_id", "quantity_change", "timestamp"],
+                    "properties": {
+                        "_id": {"type": "string"},
+                        "product_id": {"type": "string"},
+                        "quantity_change": {"type": "integer"},
+                        "timestamp": {"type": "string", "format": "date-time"}
+                    }
+                }
+            }
+        }
 ```
 
 #### Schema Migration
@@ -164,28 +180,24 @@ INVENTORY_SCHEMAS = {
 - Path finding for multi-step migrations
 - Error handling and logging during migration
 
-Example migration registration from `schema_migrator.py`:
 ```python
+# Example migration registration
 def migrate_inventory_v1_to_v2(doc):
-    return {
-        **doc,
-        "_schema_version": "v2",
-        "new_field": "default_value"
-    }
+    """Migrate inventory document from v1 to v2."""
+    migrated = doc.copy()
+    migrated["_schema_version"] = "v2"
+    # Add new fields with default values
+    migrated["reorder_point"] = 0
+    return migrated
 
-SchemaMigrator.register_migration(
+# Register the migration
+schema_migrator.register_migration(
     DocumentType.INVENTORY,
     "v1",
     "v2",
     migrate_inventory_v1_to_v2
 )
 ```
-
-#### Version Tracking
-- Schema version included in Pub/Sub messages
-- Logging of schema versions and migrations
-- Validation against specific schema versions
-- Automatic handling of unversioned documents
 
 ### Document Transformation
 
@@ -248,103 +260,88 @@ transformer.register_transform(
 4. **Transformation Composition**: Combine multiple transformations
 ```python
 # Compose multiple transformations
-combined = DocumentTransformer.compose_transforms(
-    add_processing_metadata,
-    remove_sensitive_fields(["customer_email"]),
-    add_field_prefix("wh_123_")
+from functools import partial
+
+# Create partial functions with specific configurations
+remove_pii = remove_sensitive_fields([
+    "customer_email", 
+    "customer_phone"
+])
+add_warehouse_prefix = add_field_prefix(f"wh_{warehouse_id}_")
+
+# Compose transformations
+def compose_transforms(doc, *transforms):
+    """Apply multiple transformations in sequence."""
+    result = doc.copy()
+    for transform in transforms:
+        result = transform(result)
+    return result
+
+# Register the composed transformation
+transformer.register_transform(
+    TransformStage.PRE_PUBLISH,
+    DocumentType.TRANSACTION,
+    partial(compose_transforms, 
+            remove_pii, 
+            add_warehouse_prefix, 
+            add_processing_metadata)
 )
 ```
 
-### Security Module
+## Health Checks
 
-The connector includes a dedicated security module for comprehensive data protection. This module provides field-level encryption, masking, hashing, and other security transformations to protect sensitive data in transit.
+The connector provides two health check endpoints:
 
-Features include:
-- Field-level protection with multiple methods (hash, mask, encrypt, remove, etc.)
-- Flexible field selection using exact paths or regex patterns
-- Built-in protection rules for PII and payment data
-- Integration with the document transformation pipeline
+- `/health`: Basic health check that returns 200 if the connector is running
+- `/readiness`: Detailed health check that verifies connectivity to MongoDB, Pub/Sub, and Firestore
 
-For detailed documentation, see the [Security Module README](security/README.md).
+## Resource Monitoring
 
-Example usage:
+The connector includes comprehensive resource monitoring to prevent memory issues and optimize performance:
+
 ```python
-from connector.security import (
-    DataProtector, 
-    FieldProtectionConfig,
-    ProtectionLevel
+# Resource monitor callbacks for different memory thresholds
+resource_monitor.register_callback(
+    'memory_warning',   # 65% memory usage
+    self._handle_memory_warning
 )
 
-# Create a data protector
-protector = DataProtector()
-
-# Add a protection rule for credit card numbers
-protector.add_protection_rule(
-    FieldProtectionConfig(
-        field_matcher="payment.card_number",
-        protection_level=ProtectionLevel.MASK,
-        options={"visible_right": 4, "mask_char": "X"}
-    )
+resource_monitor.register_callback(
+    'memory_critical',  # 80% memory usage
+    self._handle_memory_critical
 )
 
-# Apply protection to a document
-protected_doc = protector.apply_field_protection(original_doc)
-# Result: {"payment": {"card_number": "XXXXXXXXXXXX1234"}}
+resource_monitor.register_callback(
+    'memory_emergency', # 90% memory usage
+    self._handle_memory_emergency
+)
 ```
 
-## Schema Validation
+The resource monitor provides automated responses to memory pressure:
+- Warning level: Log detailed memory usage
+- Critical level: Trigger garbage collection and reduce buffers
+- Emergency level: Recreate change streams and reduce message batch sizes
 
-The connector includes built-in schema validation for inventory and transaction documents:
+## Running Tests
 
-### Inventory Documents
-Required fields:
-- `product_id` (string): Unique identifier for the product
-- `warehouse_id` (string): Identifier for the warehouse
-- `quantity` (integer): Current stock quantity (minimum: 0)
-- `last_updated` (string): Timestamp in ISO format (e.g., "2024-03-20T10:00:00Z")
+### Unit Tests
 
-Optional fields:
-- `category` (string): Product category
-- `brand` (string): Product brand
-- `sku` (string): Stock keeping unit
-- `threshold_min` (integer): Minimum stock threshold
-- `threshold_max` (integer): Maximum stock threshold
+```bash
+pytest src/connector/tests/unit_tests
+```
 
-### Transaction Documents
-Required fields:
-- `transaction_id` (string): Unique identifier for the transaction
-- `product_id` (string): Product identifier
-- `warehouse_id` (string): Warehouse identifier
-- `quantity` (integer): Transaction quantity
-- `transaction_type` (string): One of: "sale", "restock", "return", "adjustment"
-- `timestamp` (string): Transaction timestamp in ISO format
+### End-to-End Tests
 
-Optional fields:
-- `order_id` (string): Associated order identifier
-- `customer_id` (string): Customer identifier
-- `notes` (string): Additional transaction notes
-
-Invalid documents are logged and not published to Pub/Sub. This ensures data quality and consistency throughout the pipeline.
+See the detailed instructions in `src/connector/tests/e2e_tests/README.md` to set up the test environment and run end-to-end tests.
 
 ## Running the Connector
 
-Development:
 ```bash
-python -m connector.main
-```
+# Run with default config
+python -m src.connector
 
-Production (using Cloud Run):
-```bash
-# Build container
-docker build -t gcr.io/[PROJECT_ID]/mongo-connector .
-
-# Push to Container Registry
-docker push gcr.io/[PROJECT_ID]/mongo-connector
-
-# Deploy to Cloud Run
-gcloud run deploy mongo-connector \
-  --image gcr.io/[PROJECT_ID]/mongo-connector \
-  --platform managed
+# Run with specific config
+python -m src.connector --config /path/to/config.yaml
 ```
 
 ## Monitoring
