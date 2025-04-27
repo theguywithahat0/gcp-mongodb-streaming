@@ -178,11 +178,54 @@ The connector implements multiple layers of error handling:
 
 ## Testing
 
-The connector includes:
-- Unit tests for core components
-- End-to-end tests with MongoDB replica set and emulators
+The connector includes comprehensive testing capabilities:
 
-To run the end-to-end tests, see `src/connector/tests/e2e_tests/README.md` for detailed instructions.
+### Dependencies
+
+Ensure you have all required packages installed:
+```bash
+pip install -r src/connector/requirements.txt
+pip install psutil  # Required for resource monitoring during tests
+```
+
+### End-to-End Tests
+
+Follow these steps to run the end-to-end tests:
+
+1. **Clean up any existing test environment**:
+   ```bash
+   sudo ./src/connector/tests/e2e_tests/cleanup_test_env.sh
+   ```
+
+2. **Set up the test environment**:
+   ```bash
+   sudo ./src/connector/tests/e2e_tests/setup_test_env.sh
+   ```
+   This script will start MongoDB in replica set mode and emulators for Pub/Sub and Firestore.
+
+3. **Run the tests**:
+   ```bash
+   PYTHONPATH=$(pwd) \
+   PUBSUB_EMULATOR_HOST=localhost:8085 \
+   FIRESTORE_EMULATOR_HOST=localhost:8086 \
+   python src/connector/tests/e2e_tests/basic_e2e_test.py
+   ```
+
+4. **Clean up after testing**:
+   ```bash
+   sudo ./src/connector/tests/e2e_tests/cleanup_test_env.sh
+   ```
+
+For detailed instructions and troubleshooting tips, see `src/connector/tests/e2e_tests/README.md`.
+
+### Test Verification
+
+A successful test will output:
+```
+INFO:__main__:All test assertions passed!
+```
+
+You can also check the `test_run.log` file for detailed test logging.
 
 ## Contributing
 

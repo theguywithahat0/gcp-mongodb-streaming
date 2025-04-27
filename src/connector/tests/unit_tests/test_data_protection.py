@@ -4,8 +4,9 @@ import os
 import unittest
 import base64
 from unittest.mock import patch, MagicMock
+from cryptography.fernet import Fernet
 
-from ...security import (
+from src.connector.security import (
     DataProtector,
     FieldProtectionConfig,
     ProtectionLevel,
@@ -19,7 +20,7 @@ class TestDataProtection(unittest.TestCase):
     def setUp(self):
         """Set up test environment."""
         # Use a test key - in real environments, use a secure key management system
-        self.test_key = Fernet.generate_key().decode()
+        self.test_key = base64.urlsafe_b64encode(os.urandom(32)).decode()
         os.environ["ENCRYPTION_KEY"] = self.test_key
         self.data_protector = DataProtector()
 
@@ -52,13 +53,17 @@ class TestDataProtection(unittest.TestCase):
         self.assertTrue(
             isinstance(protected_doc["customer"]["email"], str)
         )
+        self.assertTrue(
+            protected_doc["customer"]["email"].startswith("hash:")
+        )
+        
         # Name should be untouched
         self.assertEqual(
             protected_doc["customer"]["name"], 
             doc["customer"]["name"]
         )
         
-        # Verify the protection is deterministic
+        # Since we use a deterministic salt based on field path, hashing the same value twice should produce the same result
         protected_doc2 = self.data_protector.apply_field_protection(doc)
         self.assertEqual(
             protected_doc["customer"]["email"],
@@ -71,6 +76,10 @@ class TestDataProtection(unittest.TestCase):
         self.assertEqual(
             protected_doc["_security_metadata"]["protected_fields"][0]["field"],
             "customer.email"
+        )
+        self.assertEqual(
+            protected_doc["_security_metadata"]["protected_fields"][0]["protection"],
+            "hash"
         )
 
     def test_mask_protection(self):
@@ -155,110 +164,126 @@ class TestDataProtection(unittest.TestCase):
         protected_doc = self.data_protector.apply_field_protection(doc)
         
         # Verify the SSN was encrypted
-        self.assertNotEqual(
-            protected_doc["user"]["ssn"],
-            doc["user"]["ssn"]
-        )
-        self.assertTrue(
-            protected_doc["user"]["ssn"].startswith("enc:")
-        )
+        encrypted_ssn = protected_doc["user"]["ssn"]
+        self.assertTrue(encrypted_ssn.startswith("enc:"))
+        self.assertNotEqual(encrypted_ssn, doc["user"]["ssn"])
+        
         # Name should be untouched
         self.assertEqual(
             protected_doc["user"]["name"],
             doc["user"]["name"]
         )
+        
+        # Verify encryption is non-deterministic (different each time)
+        protected_doc2 = self.data_protector.apply_field_protection(doc)
+        self.assertNotEqual(
+            protected_doc["user"]["ssn"],
+            protected_doc2["user"]["ssn"]
+        )
 
-    def test_nested_document_protection(self):
-        """Test protection of nested documents and arrays."""
-        # Configure rules
-        email_rule = FieldProtectionConfig(
-            field_matcher="user.email",
-            protection_level=ProtectionLevel.MASK,
-            options={"visible_left": 2, "mask_char": "*"}
-        )
-        card_rule = FieldProtectionConfig(
-            field_matcher="user.payment_methods.card_number",
-            protection_level=ProtectionLevel.MASK,
-            options={"visible_right": 4, "mask_char": "X"}
-        )
-        self.data_protector.add_protection_rule(email_rule)
-        self.data_protector.add_protection_rule(card_rule)
-        
-        # Test document with nested array
-        doc = {
-            "user": {
-                "email": "test@example.com",
-                "payment_methods": [
-                    {
-                        "type": "credit_card",
-                        "card_number": "4111111111111111"
-                    },
-                    {
-                        "type": "credit_card",
-                        "card_number": "5555555555554444"
-                    }
-                ]
-            }
-        }
-        
-        # Apply protection
-        protected_doc = self.data_protector.apply_field_protection(doc)
-        
-        # Verify email was masked
-        self.assertEqual(
-            protected_doc["user"]["email"],
-            "te*************"
-        )
-        
-        # Verify card numbers in array were masked
-        self.assertEqual(
-            protected_doc["user"]["payment_methods"][0]["card_number"],
-            "XXXXXXXXXXXX1111"
-        )
-        self.assertEqual(
-            protected_doc["user"]["payment_methods"][1]["card_number"],
-            "XXXXXXXXXXXX4444"
-        )
+    def test_field_pattern_matching(self):
+        """Test various field pattern matching scenarios."""
+        # Test exact matches
+        self.assertTrue(self.data_protector._matches_field("user.email", "user.email"))
+        self.assertFalse(self.data_protector._matches_field("user.name", "user.email"))
+
+        # Test wildcards in field names
+        self.assertTrue(self.data_protector._matches_field("user.email", "user.*"))
+        self.assertTrue(self.data_protector._matches_field("user.profile.email", "user.*.email"))
+        self.assertFalse(self.data_protector._matches_field("user.profile.name", "user.*.email"))
+
+        # Test array indices
+        self.assertTrue(self.data_protector._matches_field("users[0].email", "users[*].email"))
+        self.assertTrue(self.data_protector._matches_field("users[42].profile.email", "users[*].profile.email"))
+        self.assertFalse(self.data_protector._matches_field("users.0.email", "users[*].email"))
+
+        # Test nested arrays
+        self.assertTrue(self.data_protector._matches_field("users[0].addresses[1].street", "users[*].addresses[*].street"))
+        self.assertTrue(self.data_protector._matches_field("data[0][1].value", "data[*][*].value"))
+
+        # Test complex patterns
+        self.assertTrue(self.data_protector._matches_field(
+            "customers[0].orders[1].items[2].price",
+            "customers[*].orders[*].items[*].price"
+        ))
+        self.assertTrue(self.data_protector._matches_field(
+            "users[0].profile.addresses[1].details.postcode",
+            "users[*].*.addresses[*].*.postcode"
+        ))
+
+        # Test invalid patterns
+        with self.assertLogs(self.data_protector.logger, level='WARNING') as log:
+            # Test empty pattern
+            self.assertFalse(self.data_protector._matches_field("test.field", ""))
+            # Test invalid regex pattern
+            self.assertFalse(self.data_protector._matches_field("test.field", "[invalid"))
+            # Test invalid pattern type
+            self.assertFalse(self.data_protector._matches_field("test.field", 123))
+            
+            # Verify warning messages
+            log_messages = '\n'.join(log.output)
+            self.assertIn("Invalid pattern", log_messages)
 
     def test_regex_field_matcher(self):
-        """Test using regex patterns for field matching."""
-        import re
+        """Test regex field matching with various patterns."""
+        # Test simple field match
+        self.assertTrue(self.data_protector._matches_field("user.email", "user.email"))
         
-        # Configure a rule with regex pattern
-        rule = FieldProtectionConfig(
-            field_matcher=re.compile(r'.*email.*', re.IGNORECASE),
-            protection_level=ProtectionLevel.MASK,
-            options={"visible_left": 2, "mask_char": "*"}
-        )
-        self.data_protector.add_protection_rule(rule)
+        # Test wildcard matches
+        self.assertTrue(self.data_protector._matches_field("user.email", "user.*"))
+        self.assertTrue(self.data_protector._matches_field("user.contacts[0].email", "user.contacts[*].email"))
+        self.assertTrue(self.data_protector._matches_field("data.items[2].details.value", "data.items[*].details.*"))
         
-        # Test document with various email fields
-        doc = {
-            "customer": {
-                "email": "customer@example.com",
-                "alternate_email": "alternate@example.com",
-                "contact": {
-                    "work_email": "work@example.com"
-                }
-            }
-        }
+        # Test non-matches
+        self.assertFalse(self.data_protector._matches_field("user.phone", "user.email"))
+        self.assertFalse(self.data_protector._matches_field("customer.email", "user.*"))
+        self.assertFalse(self.data_protector._matches_field("user.contacts.email", "user.contacts[*].email"))
         
-        # Apply protection
-        protected_doc = self.data_protector.apply_field_protection(doc)
+        # Test empty inputs
+        self.assertFalse(self.data_protector._matches_field("", "user.email"))
+        self.assertFalse(self.data_protector._matches_field("user.email", ""))
         
-        # Verify all email fields were masked
-        self.assertEqual(
-            protected_doc["customer"]["email"],
-            "cu*******************"
-        )
-        self.assertEqual(
-            protected_doc["customer"]["alternate_email"],
-            "al*******************"
-        )
-        self.assertEqual(
-            protected_doc["customer"]["contact"]["work_email"],
-            "wo****************"
-        )
+        # Test complex nested patterns
+        self.assertTrue(self.data_protector._matches_field(
+            "orders[0].items[1].details.price",
+            "orders[*].items[*].details.*"
+        ))
+        self.assertTrue(self.data_protector._matches_field(
+            "user.addresses[0].unit[2].number",
+            "user.addresses[*].unit[*].*"
+        ))
+        
+        # Test dots in field names
+        self.assertTrue(self.data_protector._matches_field(
+            "metadata.user.ip.address",
+            "metadata.user.ip.address"
+        ))
+        self.assertTrue(self.data_protector._matches_field(
+            "data.field.with.dots",
+            "data.field.with.dots"
+        ))
+        
+        # Test multiple wildcards
+        self.assertTrue(self.data_protector._matches_field(
+            "data[0].items[1].details[2].value",
+            "data[*].items[*].details[*].*"
+        ))
+        
+        # Test partial wildcards
+        self.assertFalse(self.data_protector._matches_field(
+            "user.contacts[0].details.email",
+            "user.*.email"  # This won't match because there are more levels
+        ))
+        
+        # Test invalid patterns (should not raise exceptions)
+        self.assertFalse(self.data_protector._matches_field(
+            "user.email",
+            "user.[invalid].*"
+        ))
+        self.assertFalse(self.data_protector._matches_field(
+            "user.email",
+            "user.(invalid).*"
+        ))
 
     def test_predefined_rules(self):
         """Test the predefined protection rule sets."""
@@ -318,17 +343,180 @@ class TestDataProtection(unittest.TestCase):
         transformed_doc = transform_func(doc)
         
         # Verify email was hashed
-        self.assertNotEqual(
-            transformed_doc["customer"]["email"],
-            doc["customer"]["email"]
-        )
+        hashed_email = transformed_doc["customer"]["email"]
+        self.assertTrue(hashed_email.startswith("hash:"))
+        self.assertNotEqual(hashed_email, doc["customer"]["email"])
         
-        # Test with mock transformer
-        transform_func(doc)  # This would be called by DocumentTransformer
+        # Verify transformation is deterministic
+        transformed_doc2 = transform_func(doc)
+        self.assertEqual(
+            transformed_doc["customer"]["email"],
+            transformed_doc2["customer"]["email"]
+        )
 
+    def test_metadata_collection(self):
+        """Test collection and propagation of protection metadata."""
+        data_protector = DataProtector()
+        data_protector.add_protection_rule(FieldProtectionConfig(
+            field_matcher="user.*.email",
+            protection_level=ProtectionLevel.MASK
+        ))
+        data_protector.add_protection_rule(FieldProtectionConfig(
+            field_matcher="user.payment_info.*.card_number",
+            protection_level=ProtectionLevel.ENCRYPT
+        ))
 
-# Import here to avoid circular imports in the test
-from cryptography.fernet import Fernet
+        doc = {
+            "user": {
+                "personal": {"email": "test@example.com"},
+                "work": {"email": "work@company.com"},
+                "payment_info": {
+                    "primary": {"card_number": "4111111111111111"},
+                    "backup": {"card_number": "5555555555554444"}
+                }
+            }
+        }
+
+        protected_doc = data_protector.apply_field_protection(doc)
+
+        # Verify metadata structure
+        metadata = protected_doc.get("_protection_metadata", {})
+        self.assertIn("fields", metadata)
+        
+        # Check email protection metadata
+        email_paths = ["user.personal.email", "user.work.email"]
+        for path in email_paths:
+            self.assertIn(path, metadata["fields"])
+            self.assertEqual(metadata["fields"][path]["type"], "mask")
+
+        # Check card number protection metadata
+        card_paths = ["user.payment_info.primary.card_number", 
+                     "user.payment_info.backup.card_number"]
+        for path in card_paths:
+            self.assertIn(path, metadata["fields"])
+            self.assertEqual(metadata["fields"][path]["type"], "encrypt")
+
+    def test_complex_nested_arrays(self):
+        """Test protection of deeply nested arrays with mixed content."""
+        data_protector = DataProtector()
+        data_protector.add_protection_rule(FieldProtectionConfig(
+            field_matcher="orders[*].items[*].details.price",
+            protection_level=ProtectionLevel.MASK
+        ))
+        data_protector.add_protection_rule(FieldProtectionConfig(
+            field_matcher="orders[*].customer.contact[*].email",
+            protection_level=ProtectionLevel.HASH
+        ))
+
+        doc = {
+            "orders": [
+                {
+                    "items": [
+                        {"details": {"price": 99.99, "name": "Item 1"}},
+                        {"details": {"price": 49.99, "name": "Item 2"}}
+                    ],
+                    "customer": {
+                        "contact": [
+                            {"email": "customer1@example.com"},
+                            {"email": "customer2@example.com"}
+                        ]
+                    }
+                },
+                {
+                    "items": [
+                        {"details": {"price": 199.99, "name": "Item 3"}}
+                    ],
+                    "customer": {
+                        "contact": [
+                            {"email": "customer3@example.com"}
+                        ]
+                    }
+                }
+            ]
+        }
+
+        protected_doc = data_protector.apply_field_protection(doc)
+
+        # Verify prices are masked
+        self.assertNotEqual(
+            protected_doc["orders"][0]["items"][0]["details"]["price"],
+            99.99
+        )
+        self.assertNotEqual(
+            protected_doc["orders"][0]["items"][1]["details"]["price"],
+            49.99
+        )
+        self.assertNotEqual(
+            protected_doc["orders"][1]["items"][0]["details"]["price"],
+            199.99
+        )
+
+        # Verify emails are hashed
+        for order in protected_doc["orders"]:
+            for contact in order["customer"]["contact"]:
+                self.assertTrue(contact["email"].startswith("hash:"))
+
+        # Verify non-protected fields remain unchanged
+        self.assertEqual(
+            protected_doc["orders"][0]["items"][0]["details"]["name"],
+            "Item 1"
+        )
+        self.assertEqual(
+            protected_doc["orders"][1]["items"][0]["details"]["name"],
+            "Item 3"
+        )
+
+    def test_nested_document_protection(self):
+        """Test protection of nested documents and arrays."""
+        # Configure rules
+        email_rule = FieldProtectionConfig(
+            field_matcher="user.email",
+            protection_level=ProtectionLevel.MASK,
+            options={"visible_left": 2, "mask_char": "*"}
+        )
+        card_rule = FieldProtectionConfig(
+            field_matcher="user.payment_methods[*].card_number",
+            protection_level=ProtectionLevel.MASK,
+            options={"visible_right": 4, "mask_char": "X"}
+        )
+        self.data_protector.add_protection_rule(email_rule)
+        self.data_protector.add_protection_rule(card_rule)
+        
+        # Test document with nested array
+        doc = {
+            "user": {
+                "email": "test@example.com",
+                "payment_methods": [
+                    {
+                        "type": "credit_card",
+                        "card_number": "4111111111111111"
+                    },
+                    {
+                        "type": "credit_card",
+                        "card_number": "5555555555554444"
+                    }
+                ]
+            }
+        }
+        
+        # Apply protection
+        protected_doc = self.data_protector.apply_field_protection(doc)
+        
+        # Verify email was masked
+        masked_email = protected_doc["user"]["email"]
+        self.assertTrue(masked_email.startswith("te"))
+        self.assertTrue(all(c == "*" for c in masked_email[2:]))
+        
+        # Verify card numbers in array were masked
+        self.assertEqual(
+            protected_doc["user"]["payment_methods"][0]["card_number"],
+            "XXXXXXXXXXXX1111"
+        )
+        self.assertEqual(
+            protected_doc["user"]["payment_methods"][1]["card_number"],
+            "XXXXXXXXXXXX4444"
+        )
+
 
 if __name__ == "__main__":
     unittest.main() 

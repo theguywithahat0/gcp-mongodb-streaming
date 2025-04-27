@@ -3,6 +3,9 @@ Schema validator for MongoDB documents in the GCP connector pipeline.
 
 This module provides schema validation functionality for inventory and transaction
 documents before they are processed and sent to Google Cloud Pub/Sub.
+
+All schema definitions are managed by the SchemaRegistry class. This validator
+uses those schemas to validate documents against their respective versions.
 """
 
 from typing import Dict, Any, Optional, Tuple
@@ -66,6 +69,23 @@ class SchemaValidator:
     """Validates MongoDB documents against predefined schemas."""
 
     @staticmethod
+    def get_schema(doc_type: DocumentType, version: str) -> Dict[str, Any]:
+        """
+        Get the schema for a specific document type and version.
+
+        Args:
+            doc_type: Type of document (INVENTORY or TRANSACTION)
+            version: Schema version
+
+        Returns:
+            The schema definition
+
+        Raises:
+            ValueError: If the schema version is invalid
+        """
+        return SchemaRegistry.get_schema(doc_type, version)
+
+    @staticmethod
     def validate_document(document: Dict[str, Any], doc_type: str) -> Optional[str]:
         """
         Validates a document against its schema.
@@ -96,7 +116,7 @@ class SchemaValidator:
                 )
 
             # Get and validate against schema
-            schema = SchemaRegistry.get_schema(doc_type_enum, version)
+            schema = SchemaValidator.get_schema(doc_type_enum, version)
             validate(instance=document, schema=schema)
             return None
 

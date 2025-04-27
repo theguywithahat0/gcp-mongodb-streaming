@@ -43,6 +43,9 @@ async def wait_for_operation(received_messages, expected_operation, timeout=10):
 
 async def run_test():
     """Run a simple end-to-end test."""
+    listener = None
+    listener_task = None
+    future = None
     try:
         # Connect to MongoDB
         mongo_client = MongoClient('mongodb://localhost:27017/?replicaSet=rs0')
@@ -175,116 +178,117 @@ async def run_test():
             )
         )
 
-        try:
-            # Initialize and start change stream listener
-            listener = ChangeStreamListener(
-                config=config,
-                collection_config=config.mongodb.collections[0],
-                mongo_client=mongo_client,
-                publisher=publisher,
-                firestore_client=firestore_client,
-                serialization_format=SerializationFormat.MSGPACK,
-                backpressure_config=config.pubsub.publisher.backpressure
-            )
+        # Initialize and start change stream listener
+        listener = ChangeStreamListener(
+            config=config,
+            collection_config=config.mongodb.collections[0],
+            mongo_client=mongo_client,
+            publisher=publisher,
+            firestore_client=firestore_client,
+            serialization_format=SerializationFormat.MSGPACK,
+            backpressure_config=config.pubsub.publisher.backpressure
+        )
 
-            # Start the listener
-            listener_task = asyncio.create_task(listener.start())
-            await asyncio.sleep(2)  # Wait for listener to be ready
-            logger.info("Change stream listener started")
+        # Start the listener
+        listener_task = asyncio.create_task(listener.start())
+        await asyncio.sleep(2)  # Wait for listener to be ready
+        logger.info("Change stream listener started")
 
-            # Test 1: Insert document
-            test_doc = {
-                "_id": "test1",
-                "_schema_version": "v1",
-                "transaction_id": "T123",
-                "product_id": "P123",
-                "warehouse_id": "W1",
-                "quantity": 10,
-                "transaction_type": "sale",
-                "timestamp": datetime.now(UTC).isoformat(),
-                "order_id": "O123",
-                "customer_id": "C123",
-                "notes": "Test transaction"
-            }
-            collection.insert_one(test_doc)
-            logger.info("Inserted test document")
-            
-            # Wait for insert operation to be confirmed
-            assert await wait_for_operation(received_messages, 'insert'), "Insert operation not received"
-            logger.info("Insert operation confirmed")
+        # Test 1: Insert document
+        test_doc = {
+            "_id": "test1",
+            "_schema_version": "v1",
+            "transaction_id": "T123",
+            "product_id": "P123",
+            "warehouse_id": "W1",
+            "quantity": 10,
+            "transaction_type": "sale",
+            "timestamp": datetime.now(UTC).isoformat(),
+            "order_id": "O123",
+            "customer_id": "C123",
+            "notes": "Test transaction"
+        }
+        collection.insert_one(test_doc)
+        logger.info("Inserted test document")
+        
+        # Wait for insert operation to be confirmed
+        assert await wait_for_operation(received_messages, 'insert'), "Insert operation not received"
+        logger.info("Insert operation confirmed")
 
-            # Test 2: Update document
-            collection.update_one(
-                {"_id": "test1"},
-                {"$set": {
-                    "quantity": 15,
-                    "notes": "Updated test transaction",
-                    "timestamp": datetime.now(UTC).isoformat()
-                }}
-            )
-            logger.info("Updated test document")
-            
-            # Wait for update operation to be confirmed
-            assert await wait_for_operation(received_messages, 'update'), "Update operation not received"
-            logger.info("Update operation confirmed")
+        # Test 2: Update document
+        collection.update_one(
+            {"_id": "test1"},
+            {"$set": {
+                "quantity": 15,
+                "notes": "Updated test transaction",
+                "timestamp": datetime.now(UTC).isoformat()
+            }}
+        )
+        logger.info("Updated test document")
+        
+        # Wait for update operation to be confirmed
+        assert await wait_for_operation(received_messages, 'update'), "Update operation not received"
+        logger.info("Update operation confirmed")
 
-            # Test 3: Delete document
-            collection.delete_one({"_id": "test1"})
-            logger.info("Deleted test document")
-            
-            # Wait for delete operation to be confirmed
-            assert await wait_for_operation(received_messages, 'delete'), "Delete operation not received"
-            logger.info("Delete operation confirmed")
+        # Test 3: Delete document
+        collection.delete_one({"_id": "test1"})
+        logger.info("Deleted test document")
+        
+        # Wait for delete operation to be confirmed
+        assert await wait_for_operation(received_messages, 'delete'), "Delete operation not received"
+        logger.info("Delete operation confirmed")
 
-            # Verify results
-            logger.info(f"Received {len(received_messages)} messages:")
-            for msg in received_messages:
-                logger.info(f"Operation: {msg['operation']}")
+        # Verify results
+        logger.info(f"Received {len(received_messages)} messages:")
+        for msg in received_messages:
+            logger.info(f"Operation: {msg['operation']}")
 
-            # Basic assertions
-            assert len(received_messages) == 3, f"Expected 3 messages, got {len(received_messages)}"
-            
-            logger.info("All test assertions passed!")
-
-        finally:
-            # Cleanup
-            try:
-                # Stop the change stream listener
-                if listener:
-                    await listener.stop()
-                    
-                # Cancel the listener task
-                if 'listener_task' in locals():
-                    listener_task.cancel()
-                    try:
-                        await listener_task
-                    except asyncio.CancelledError:
-                        pass
-
-                # Cancel the subscriber
-                if 'future' in locals():
-                    future.cancel()
-                    
-                # Clean up the collection
-                collection.delete_many({})
-
-                # Clean up Pub/Sub resources
-                try:
-                    subscriber.delete_subscription(request={"subscription": subscription_path})
-                    publisher.delete_topic(request={"topic": topic_path})
-                    publisher.delete_topic(request={"topic": status_topic_path})
-                except Exception as e:
-                    logger.warning(f"Error during Pub/Sub cleanup: {e}")
-
-                # Close clients
-                mongo_client.close()
-
-            except Exception as e:
-                logger.warning(f"Error during cleanup: {e}")
+        # Basic assertions
+        assert len(received_messages) == 3, f"Expected 3 messages, got {len(received_messages)}"
+        
+        logger.info("All test assertions passed!")
 
     except Exception as e:
         logger.error(f"Test failed: {e}")
         raise
+
+    finally:
+        # Cleanup
+        try:
+            # Stop the change stream listener
+            if listener:
+                await listener.stop()
+                
+            # Cancel the listener task
+            if listener_task:
+                listener_task.cancel()
+                try:
+                    await listener_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Cancel the subscriber
+            if future:
+                future.cancel()
+                
+            # Clean up the collection
+            collection.delete_many({})
+
+            # Clean up Pub/Sub resources
+            try:
+                subscriber.delete_subscription(request={"subscription": subscription_path})
+                publisher.delete_topic(request={"topic": topic_path})
+                publisher.delete_topic(request={"topic": status_topic_path})
+            except Exception as e:
+                logger.warning(f"Error during Pub/Sub cleanup: {e}")
+
+            # Close clients
+            mongo_client.close()
+            subscriber.close()
+            publisher.close()
+
+        except Exception as e:
+            logger.warning(f"Error during cleanup: {e}")
 
 if __name__ == "__main__":
     asyncio.run(run_test()) 

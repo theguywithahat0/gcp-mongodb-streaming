@@ -92,11 +92,13 @@ class CircuitBreaker:
         """Handle a successful operation."""
         async with self._state_lock:
             if self._state == CircuitBreakerState.HALF_OPEN:
-                # Success in half-open state means we can close the circuit
-                await self._update_state(CircuitBreakerState.CLOSED)
-                self._failure_count = 0
-                self._half_open_calls = 0
-                self._last_failure_time = None
+                self._half_open_calls += 1
+                # Only close the circuit after enough successful calls
+                if self._half_open_calls >= self.half_open_max_calls:
+                    await self._update_state(CircuitBreakerState.CLOSED)
+                    self._failure_count = 0
+                    self._half_open_calls = 0
+                    self._last_failure_time = None
             elif self._state == CircuitBreakerState.CLOSED:
                 # Reset failure count on success in closed state
                 self._failure_count = 0
@@ -165,10 +167,6 @@ class CircuitBreaker:
                 raise CircuitBreakerError(
                     f"Circuit breaker '{self.name}' is OPEN"
                 )
-
-            if self._state == CircuitBreakerState.HALF_OPEN:
-                async with self._state_lock:
-                    self._half_open_calls += 1
 
             try:
                 result = await func(*args, **kwargs)
